@@ -23,7 +23,12 @@ defmodule Bonfire.WordPress.SyncTest do
   end
 
   defp sync_jobs,
-    do: for(job <- all_enqueued(worker: Bonfire.Common.Import), job.args["op"] == "wordpress_sync", do: job)
+    do:
+      for(
+        job <- all_enqueued(worker: Bonfire.Common.Import),
+        job.args["op"] == "wordpress_sync",
+        do: job
+      )
 
   test "a ping for the configured site queues one sync, however many pings come before it runs" do
     assert :queued = Sync.ping("http://www.totnespulse.local/")
@@ -173,7 +178,11 @@ defmodule Bonfire.WordPress.SyncTest do
 
     mock_global(fn
       %{method: :get, url: "#{@site}/wp-json/wp/v2/podcast" <> _} ->
-        %Tesla.Env{status: 200, headers: [{"x-wp-totalpages", "1"}], body: Jason.encode!([episode])}
+        %Tesla.Env{
+          status: 200,
+          headers: [{"x-wp-totalpages", "1"}],
+          body: Jason.encode!([episode])
+        }
 
       %{method: :get, url: "#{@site}/wp-json/wp/v2/posts" <> _} ->
         %Tesla.Env{status: 200, headers: [{"x-wp-totalpages", "1"}], body: Jason.encode!([])}
@@ -191,7 +200,12 @@ defmodule Bonfire.WordPress.SyncTest do
     assert Agent.get(media_requests, & &1) == []
 
     media = media_of(link)
-    assert Enum.any?(media, &(&1.path == audio and String.starts_with?(&1.media_type || "", "audio")))
+
+    assert Enum.any?(
+             media,
+             &(&1.path == audio and String.starts_with?(&1.media_type || "", "audio"))
+           )
+
     assert Enum.any?(media, &(&1.path == cover and primary_image?(&1)))
   end
 
@@ -223,7 +237,8 @@ defmodule Bonfire.WordPress.SyncTest do
     </params></methodCall>
     """
 
-    assert {:ok, %{method: "weblogUpdates.extendedPing", home_url: @site}} = XMLRPC.parse_ping(body)
+    assert {:ok, %{method: "weblogUpdates.extendedPing", home_url: @site}} =
+             XMLRPC.parse_ping(body)
   end
 
   defp rest_post(id, link, title),

@@ -177,7 +177,8 @@ defmodule Bonfire.WordPress.Posts do
 
   defp web_url(url) when is_binary(url) do
     case URI.parse(url) do
-      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and host not in [nil, ""] ->
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https"] and host not in [nil, ""] ->
         url
 
       _ ->

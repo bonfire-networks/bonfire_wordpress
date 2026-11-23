@@ -293,9 +293,13 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
         &(&1.path == "https://www.totnespulse.local/wp-content/uploads/2018/12/Untitled-2.png")
       )
 
-    assert image, "expected the featured image attached, got #{inspect(Enum.map(media_of(id), & &1.path))}"
+    assert image,
+           "expected the featured image attached, got #{inspect(Enum.map(media_of(id), & &1.path))}"
+
     assert primary_image?(image)
-    assert Bonfire.Files.Media.media_alt(image, false) == "Latest plans for the Totnes Market Square"
+
+    assert Bonfire.Files.Media.media_alt(image, false) ==
+             "Latest plans for the Totnes Market Square"
 
     assert Agent.get(media_requests, & &1) == []
   end
@@ -313,7 +317,9 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
             "https://www.totnespulse.local/wp-content/uploads/2024/11/Tony-Gee-Finley-Porter-Mix.mp3")
       )
 
-    assert audio, "expected the episode's audio attached, got #{inspect(Enum.map(media_of(id), & &1.path))}"
+    assert audio,
+           "expected the episode's audio attached, got #{inspect(Enum.map(media_of(id), & &1.path))}"
+
     assert audio.media_type =~ "audio"
 
     # and its cover image as the primary image

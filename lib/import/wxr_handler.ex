@@ -54,14 +54,19 @@ defmodule Bonfire.WordPress.Import.WXR.Handler do
   def handle_event(:end_element, "wp:base_site_url", state),
     do: {:ok, %{state | base_site_url: text(state)}}
 
-  def handle_event(:end_element, "wp:author", %{author: %{"wp:author_login" => login} = author} = state)
+  def handle_event(
+        :end_element,
+        "wp:author",
+        %{author: %{"wp:author_login" => login} = author} = state
+      )
       when is_binary(login) and login != "",
       do: {:ok, %{state | author: nil, authors: Map.put(state.authors, login, author)}}
 
   def handle_event(:end_element, "wp:author", state), do: {:ok, %{state | author: nil}}
 
   def handle_event(:end_element, name, %{author: author} = state)
-      when is_map(author) and name in ["wp:author_login", "wp:author_email", "wp:author_display_name"],
+      when is_map(author) and
+             name in ["wp:author_login", "wp:author_email", "wp:author_display_name"],
       do: {:ok, %{state | author: Map.put(author, name, text(state))}}
 
   def handle_event(:end_element, _name, state), do: {:ok, state}

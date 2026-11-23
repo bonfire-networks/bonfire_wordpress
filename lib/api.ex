@@ -60,11 +60,14 @@ defmodule Bonfire.WordPress.API do
         "order" => "asc",
         # the featured image comes embedded in the same answer; with `_fields`, an embed needs `_links` and `_embedded` listed too. `meta` holds a podcast's audio file and cover (Seriously Simple Podcasting), public like the rest
         "_embed" => "wp:featuredmedia",
-        "_fields" => "id,link,date_gmt,modified_gmt,title,content,featured_media,meta,_links,_embedded"
+        "_fields" =>
+          "id,link,date_gmt,modified_gmt,title,content,featured_media,meta,_links,_embedded"
       }
       |> then(&if since, do: Map.put(&1, "modified_after", DateTime.to_iso8601(since)), else: &1)
 
-    url = "#{String.trim_trailing(site, "/")}/wp-json/wp/v2/#{URI.encode(rest_type)}?" <> URI.encode_query(query)
+    url =
+      "#{String.trim_trailing(site, "/")}/wp-json/wp/v2/#{URI.encode(rest_type)}?" <>
+        URI.encode_query(query)
 
     with {:ok, %{status: 200, body: body} = env} <- Bonfire.Common.HTTP.get(url),
          {:ok, posts} when is_list(posts) <- decode(body) do
@@ -80,7 +83,8 @@ defmodule Bonfire.WordPress.API do
   end
 
   defp total_pages(%{headers: headers}) do
-    with {_, value} <- Enum.find(headers || [], fn {k, _} -> String.downcase(k) == "x-wp-totalpages" end),
+    with {_, value} <-
+           Enum.find(headers || [], fn {k, _} -> String.downcase(k) == "x-wp-totalpages" end),
          {n, _} <- Integer.parse(value) do
       n
     else
@@ -113,7 +117,9 @@ defmodule Bonfire.WordPress.API do
   end
 
   # the embedded featured image, unless the site sent an error instead (eg. `rest_forbidden` for media that isn't public)
-  defp featured_image(%{"_embedded" => %{"wp:featuredmedia" => [%{"source_url" => url} = image | _]}})
+  defp featured_image(%{
+         "_embedded" => %{"wp:featuredmedia" => [%{"source_url" => url} = image | _]}
+       })
        when is_binary(url) and url != "" do
     %{
       url: url,

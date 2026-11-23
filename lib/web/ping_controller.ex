@@ -11,7 +11,8 @@ defmodule Bonfire.WordPress.Web.PingController do
 
   def ping(conn, _params) do
     reply =
-      with {:ok, body, _conn} <- Plug.Conn.read_body(conn, length: @max_body, read_length: @max_body),
+      with {:ok, body, _conn} <-
+             Plug.Conn.read_body(conn, length: @max_body, read_length: @max_body),
            {:ok, %{home_url: home_url}} <- XMLRPC.parse_ping(body) do
         Bonfire.WordPress.Sync.ping(home_url)
         XMLRPC.thanks()

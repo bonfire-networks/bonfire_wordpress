@@ -183,7 +183,8 @@ defmodule Bonfire.WordPress.Import.WXR do
 
   defp count(state, key), do: update_in(state, [:counts, key], &(&1 + 1))
 
-  defp skip(state, reason), do: update_in(state, [:skipped], &Map.update(&1, reason, 1, fn n -> n + 1 end))
+  defp skip(state, reason),
+    do: update_in(state, [:skipped], &Map.update(&1, reason, 1, fn n -> n + 1 end))
 
   defp items(counts, preview) do
     [
@@ -197,7 +198,13 @@ defmodule Bonfire.WordPress.Import.WXR do
           options: author_options(preview.author_counts)
         }
       else
-        %{key: :posts, label: l("Posts"), count: 0, importable?: false, reason: l("Nothing to import in it")}
+        %{
+          key: :posts,
+          label: l("Posts"),
+          count: 0,
+          importable?: false,
+          reason: l("Nothing to import in it")
+        }
       end,
       if counts.pages > 0 do
         %{
@@ -235,7 +242,8 @@ defmodule Bonfire.WordPress.Import.WXR do
     do: [
       %{
         key: l("Posts"),
-        reason: lp("%{count} already imported", "%{count} already imported", already, count: already)
+        reason:
+          lp("%{count} already imported", "%{count} already imported", already, count: already)
       }
     ]
 
@@ -258,7 +266,10 @@ defmodule Bonfire.WordPress.Import.WXR do
     text =
       [
         if(created != [],
-          do: lp("%{count} user created", "%{count} users created", length(created), count: length(created))
+          do:
+            lp("%{count} user created", "%{count} users created", length(created),
+              count: length(created)
+            )
         ),
         if(matched != [],
           do:
@@ -295,7 +306,8 @@ defmodule Bonfire.WordPress.Import.WXR do
 
     # an admin's import makes this the instance's WordPress site to keep in sync (see `Bonfire.WordPress.Sync`), unless another site is configured already; it's instance config, so not anyone's import
     if :posts in keys and Import.instance_admin?(opts[:current_user]) do
-      with {:error, :other_site} <- Bonfire.WordPress.Sync.remember_site(site, opts[:current_user]) do
+      with {:error, :other_site} <-
+             Bonfire.WordPress.Sync.remember_site(site, opts[:current_user]) do
         warn(site, "Another WordPress site is configured for syncing, so this one isn't")
       end
     end
@@ -389,6 +401,7 @@ defmodule Bonfire.WordPress.Import.WXR do
       other -> error(other, "Could not import this WordPress post")
     end
   end
+
   # the post's body: from the cache a job of its chunk filled, else fetched with the rest of its chunk. When the site's API can't give it (the site is down, the API blocked, or the post missing from its answer), the export's own body instead, and a chunk whose request failed isn't requested again by its other posts' jobs
   defp body(dir, id, item, %{"site" => site, "rest_type" => rest_type, "chunk" => chunk})
        when is_integer(chunk) do
@@ -407,7 +420,11 @@ defmodule Bonfire.WordPress.Import.WXR do
           end
 
         other ->
-          warn(other, "The WordPress site's API couldn't give this chunk's bodies, using the export's")
+          warn(
+            other,
+            "The WordPress site's API couldn't give this chunk's bodies, using the export's"
+          )
+
           File.mkdir_p!(Path.join(dir, "failed"))
           File.write!(failed_chunk_path(dir, rest_type, chunk), "")
           export_body(item, "the site's API couldn't be reached")
@@ -527,5 +544,6 @@ defmodule Bonfire.WordPress.Import.WXR do
     type = if Regex.match?(~r/^[a-z0-9_-]+$/, to_string(rest_type)), do: rest_type, else: "other"
     Path.join([dir, "failed", "#{type}-#{chunk}"])
   end
+
   defp attachment_path(dir, id), do: Path.join([dir, "attachments", "#{id}.json"])
 end

@@ -14,7 +14,12 @@ defmodule Bonfire.WordPress.XMLRPC do
       {:error, :dtd}
     else
       # Saxy's default (`expand_entity: :keep`) decodes `&amp;` and the like, and leaves any other entity as text
-      case Saxy.parse_string(body, __MODULE__, %{in_value?: false, text: [], method: nil, params: []}) do
+      case Saxy.parse_string(body, __MODULE__, %{
+             in_value?: false,
+             text: [],
+             method: nil,
+             params: []
+           }) do
         {:ok, %{method: method, params: params}} when method in @methods ->
           case Enum.reverse(params) do
             [_name, home_url | _] -> {:ok, %{method: method, home_url: home_url}}

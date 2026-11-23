@@ -37,7 +37,9 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
       customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
     ]
 
-    case :httpc.request(:get, {String.to_charlist(full_url), []}, [ssl: ssl, timeout: 60_000], body_format: :binary) do
+    case :httpc.request(:get, {String.to_charlist(full_url), []}, [ssl: ssl, timeout: 60_000],
+           body_format: :binary
+         ) do
       {:ok, {{_, status, _}, headers, body}} ->
         %Tesla.Env{
           url: url,

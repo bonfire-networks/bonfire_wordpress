@@ -188,6 +188,7 @@ defmodule Bonfire.WordPress.PostsTest do
                }
              )
 
-    assert Agent.get(requests, & &1) |> Enum.any?(&String.contains?(&1, "elsewhere.example.com/bare"))
+    assert Agent.get(requests, & &1)
+           |> Enum.any?(&String.contains?(&1, "elsewhere.example.com/bare"))
   end
 end

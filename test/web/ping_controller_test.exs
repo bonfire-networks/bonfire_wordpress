@@ -23,7 +23,12 @@ defmodule Bonfire.WordPress.Web.PingControllerTest do
   end
 
   defp sync_jobs,
-    do: for(job <- all_enqueued(worker: Bonfire.Common.Import), job.args["op"] == "wordpress_sync", do: job)
+    do:
+      for(
+        job <- all_enqueued(worker: Bonfire.Common.Import),
+        job.args["op"] == "wordpress_sync",
+        do: job
+      )
 
   defp extended_ping(home),
     do: """
