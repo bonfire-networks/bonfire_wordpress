@@ -6,6 +6,7 @@ defmodule Bonfire.WordPress.SyncUpdateTest do
   use Oban.Testing, repo: Bonfire.Common.Repo
 
   import Tesla.Mock
+  require Bonfire.Common.Config
 
   alias Bonfire.WordPress.Posts
   alias Bonfire.WordPress.Sync
@@ -35,13 +36,21 @@ defmodule Bonfire.WordPress.SyncUpdateTest do
     Bonfire.Common.Repo.get!(Bonfire.Data.Social.PostContent, id)
   end
 
-  # runs a sync of the site with `posts` as the changed posts its REST API answers
-  defp sync_with(posts) do
+  # runs a sync of the site with `posts` as the changed posts its REST API answers, and `media` as its media items; returns the URLs requested
+  defp sync_with(posts, media \\ []) do
+    {:ok, requests} = Agent.start_link(fn -> [] end)
+
     mock_global(fn
-      %{method: :get, url: "#{@site}/wp-json/wp/v2/posts" <> _} ->
+      %{method: :get, url: "#{@site}/wp-json/wp/v2/posts" <> _ = url} ->
+        Agent.update(requests, &[url | &1])
         %Tesla.Env{status: 200, headers: [{"x-wp-totalpages", "1"}], body: Jason.encode!(posts)}
 
-      _ ->
+      %{method: :get, url: "#{@site}/wp-json/wp/v2/media" <> _ = url} ->
+        Agent.update(requests, &[url | &1])
+        %Tesla.Env{status: 200, body: Jason.encode!(media)}
+
+      %{url: url} ->
+        Agent.update(requests, &[url | &1])
         %Tesla.Env{status: 404, body: ""}
     end)
 
@@ -53,6 +62,8 @@ defmodule Bonfire.WordPress.SyncUpdateTest do
           do: job
 
     assert :ok = perform_job(Bonfire.Common.Import, job.args)
+
+    Agent.get(requests, & &1)
   end
 
   defp rest_post(id, link, title, html),
@@ -343,6 +354,193 @@ defmodule Bonfire.WordPress.SyncUpdateTest do
                by: news,
                current_user: importer
              )
+    end
+  end
+
+  # WordPress marks each image it inserts with the class `wp-image-<id>`, naming its upload: a synced post's images find their upload through the site's media API, as an export's find theirs among its attachments
+  describe "images in a synced post" do
+    @uploads "#{@site}/wp-content/uploads"
+
+    setup do
+      # the sync adds the site's key to the instance's settings, which also go into the app's config, which outlives each test's database rollback
+      previous = Bonfire.Common.Config.get([:bonfire_files, :redir_storages], %{})
+      on_exit(fn -> Bonfire.Common.Config.put([:bonfire_files, :redir_storages], previous) end)
+      :ok
+    end
+
+    defp rest_media(id, caption) do
+      %{
+        "id" => id,
+        "source_url" => "#{@uploads}/2026/11/shot.jpg",
+        "alt_text" => "The shot",
+        "caption" => %{"rendered" => "<p>#{caption}</p>"},
+        "description" => %{"rendered" => ""},
+        "title" => %{"rendered" => "shot"},
+        "mime_type" => "image/jpeg",
+        "media_details" => %{
+          "width" => 2000,
+          "sizes" => %{
+            "medium" => %{"source_url" => "#{@uploads}/2026/11/shot-300x200.jpg", "width" => 300},
+            "large" => %{"source_url" => "#{@uploads}/2026/11/shot-1024x683.jpg", "width" => 1024}
+          }
+        }
+      }
+    end
+
+    defp attached(link) do
+      assert {:ok, %{id: id}} = Bonfire.Federate.ActivityPub.Peered.get_by_uri(link)
+      assert {:ok, post} = Bonfire.Common.Needles.get(id, skip_boundary_check: true)
+
+      case post |> Bonfire.Common.Repo.preload([files: :media], force: true) |> Map.get(:files) do
+        files when is_list(files) -> Enum.map(files, & &1.media)
+        _none -> []
+      end
+    end
+
+    defp marker(media), do: URI.parse(Bonfire.Files.inline_url(media)).path
+
+    # first brought in by a sync, on a site never imported from an export: its upload comes from the site's media (one request, for the ids the body names)
+    defp synced_with_shot!(importer, link, shown) do
+      mock_global(fn
+        %{url: "#{@site}/wp-json/wp/v2/posts" <> _} ->
+          %Tesla.Env{
+            status: 200,
+            headers: [{"x-wp-totalpages", "1"}],
+            body: Jason.encode!([rest_post(5, link, "A shot", shown)])
+          }
+
+        %{url: "#{@site}/wp-json/wp/v2/media" <> _} ->
+          %Tesla.Env{status: 200, body: Jason.encode!([rest_media(12, "Before")])}
+
+        _ ->
+          %Tesla.Env{status: 404, body: ""}
+      end)
+
+      assert {:ok, [post]} = Bonfire.WordPress.API.changed_posts(@site, nil)
+      assert {:ok, _} = Posts.import_post(post, current_user: importer, site: @site)
+
+      assert [first] = attached(link)
+      assert content_of(link).html_body =~ marker(first)
+      first
+    end
+
+    defp media_requests(requests),
+      do: Enum.filter(requests, &String.contains?(&1, "/wp-json/wp/v2/media"))
+
+    test "an edited post's image is placed through its Media, the one it was first synced with, without asking the site again",
+         %{importer: importer} do
+      link = "#{@site}/with-a-shot/"
+
+      shown =
+        ~s(<p>a</p><p><img class="aligncenter wp-image-12 size-medium" src="#{@uploads}/2026/11/shot-300x200.jpg"></p>)
+
+      first = synced_with_shot!(importer, link, shown)
+
+      # the first sync recorded every URL of the upload, so the edit's image is known here: no media request
+      requests =
+        sync_with(
+          [rest_post(5, link, "A shot, edited", shown <> "<p>edited</p>")],
+          [rest_media(12, "After")]
+        )
+
+      assert media_requests(requests) == []
+
+      assert [again] = attached(link)
+      assert again.id == first.id
+
+      body = content_of(link).html_body
+      assert body =~ "edited"
+      assert body =~ marker(again)
+      refute body =~ "shot-300x200"
+    end
+
+    test "on a site imported from an export, an image of a known upload, at any size, is placed through its Media with no media request",
+         %{importer: importer} do
+      link = "#{@site}/shot-at-another-size/"
+
+      shown =
+        ~s(<p>a</p><p><img class="wp-image-12" src="#{@uploads}/2026/11/shot-300x200.jpg"></p>)
+
+      first = synced_with_shot!(importer, link, shown)
+
+      Process.put([:bonfire_wordpress, :imported_sites], [Sync.site_key(@site)])
+
+      larger =
+        ~s(<p>a</p><p><img class="wp-image-12" src="#{@uploads}/2026/11/shot-1024x683.jpg"></p><p>edited</p>)
+
+      requests =
+        sync_with([rest_post(5, link, "A shot, larger", larger)], [rest_media(12, "After")])
+
+      assert media_requests(requests) == []
+      assert [again] = attached(link)
+      assert again.id == first.id
+      assert content_of(link).html_body =~ marker(again)
+    end
+
+    test "on a site imported from an export, an image of an upload not known here gets a Media from its own URL and alt text, with no media request",
+         %{importer: importer} do
+      Process.put([:bonfire_wordpress, :imported_sites], [Sync.site_key(@site)])
+
+      link = "#{@site}/new-upload/"
+      import!(importer, link, "New", "<p>New</p>")
+
+      src = "#{@uploads}/2026/11/new-300x200.jpg"
+
+      requests =
+        sync_with(
+          [
+            rest_post(
+              7,
+              link,
+              "New, edited",
+              ~s(<p>x</p><p><img class="wp-image-77" src="#{src}" alt="A new one"></p>)
+            )
+          ],
+          [rest_media(77, "Never asked")]
+        )
+
+      assert media_requests(requests) == []
+      assert [media] = attached(link)
+      assert media.path == src
+      assert media.metadata["alt"] == "A new one"
+      assert content_of(link).html_body =~ marker(media)
+    end
+
+    test "on a site never imported from an export, an upload not known here is asked for, once per post",
+         %{importer: importer} do
+      link = "#{@site}/asked-for/"
+      import!(importer, link, "Asked", "<p>Asked</p>")
+
+      shown =
+        ~s(<p>a</p><p><img class="wp-image-12" src="#{@uploads}/2026/11/shot-300x200.jpg"></p>)
+
+      requests =
+        sync_with([rest_post(8, link, "Asked, edited", shown)], [rest_media(12, "From the site")])
+
+      assert [media_request] = media_requests(requests)
+      assert media_request =~ "include=12"
+      assert [media] = attached(link)
+      assert media.metadata["label"] == "From the site"
+    end
+
+    test "an image the API doesn't name, and that matches no Media here, stays as it is, and a post with no `wp-image` class makes no media request",
+         %{importer: importer} do
+      link = "#{@site}/plain-image/"
+      import!(importer, link, "Plain", "<p>Plain</p>")
+
+      requests =
+        sync_with([
+          rest_post(
+            6,
+            link,
+            "Plain, edited",
+            ~s(<p>x</p><p><img src="#{@uploads}/2026/11/other.jpg"></p>)
+          )
+        ])
+
+      assert content_of(link).html_body =~ ~s(src="#{@uploads}/2026/11/other.jpg")
+      assert attached(link) == []
+      refute Enum.any?(requests, &String.contains?(&1, "/wp-json/wp/v2/media"))
     end
   end
 end

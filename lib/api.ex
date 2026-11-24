@@ -54,7 +54,7 @@ defmodule Bonfire.WordPress.API do
       |> then(&if since, do: Map.put(&1, "modified_after", DateTime.to_iso8601(since)), else: &1)
 
     Enum.reduce_while(@sync_types, {:ok, []}, fn {rest_type, need}, {:ok, acc} ->
-      case pages(site, rest_type, query, &normalise/1, 1, []) do
+      case pages(site, rest_type, query, &normalise(&1, site), 1, []) do
         {:ok, posts} -> {:cont, {:ok, acc ++ posts}}
         _ when need == :optional -> {:cont, {:ok, acc}}
         e -> {:halt, e}
@@ -112,18 +112,96 @@ defmodule Bonfire.WordPress.API do
 
   defp total_pages(_), do: 1
 
-  defp normalise(post) do
+  defp normalise(post, site) do
+    html = get_in(post, ["content", "rendered"])
+
     %{
       title: get_in(post, ["title", "rendered"]),
       link: post["link"],
       published_at: gmt(post["date_gmt"]),
-      html: get_in(post, ["content", "rendered"]),
+      html: html,
       # by id only: the API never gives an author's email, so the user is the one an import recorded for that id (see `Bonfire.WordPress.Identities`)
       author: if(is_integer(post["author"]) and post["author"] > 0, do: %{id: post["author"]}),
       password_protected?: get_in(post, ["content", "protected"]) == true,
       media: media(post),
+      # each `<img>` the body shows, as `{src, upload id}` (see `Bonfire.WordPress.Uploads.img_tags/1`), with its alt text: placed when the post is imported, through the uploads known here or, for a site never imported from an export, the site's media (see `uploads/2`)
+      image_tags: Bonfire.WordPress.Uploads.img_tags(html),
+      image_alts: Bonfire.WordPress.Uploads.img_alts(html),
       categories: categories(post)
     }
+  end
+
+  @doc """
+  The uploads `tags` show (`{src, upload id}` from `Bonfire.WordPress.Uploads.img_tags/1`), as `Bonfire.WordPress.Uploads` entries, through one request to `site`'s media for all the ids they name (none when they name none), and the `src` of each other image.
+  """
+  def uploads(site, tags) when is_list(tags) do
+    items = media_items(site, tags |> Enum.map(&elem(&1, 1)) |> Enum.reject(&is_nil/1))
+
+    shown =
+      for {src, id} <- tags,
+          %{} = item <- [items[id]],
+          url = Bonfire.WordPress.Uploads.absolute_url(src, site) || item["source_url"],
+          do: {id, src, url, shown_width(item, url), item}
+
+    named = MapSet.new(shown, &elem(&1, 1))
+
+    {Bonfire.WordPress.Uploads.group(shown, &rest_upload/4),
+     for({src, _} <- tags, not MapSet.member?(named, src), do: src)}
+  end
+
+  # the site's media items with these ids (at most 100, WordPress's page size), by id; none when the site can't say
+  defp media_items(_site, []), do: %{}
+
+  defp media_items(site, ids) do
+    url =
+      "#{String.trim_trailing(site, "/")}/wp-json/wp/v2/media?" <>
+        URI.encode_query(%{
+          "include" => ids |> Enum.uniq() |> Enum.take(@per_page) |> Enum.join(","),
+          "per_page" => @per_page,
+          "_fields" => "id,source_url,mime_type,alt_text,caption,description,title,media_details"
+        })
+
+    with {:ok, %{status: 200, body: body}} <- Bonfire.Common.HTTP.get(url),
+         {:ok, items} when is_list(items) <- decode(body) do
+      for %{"id" => id} = item <- items, into: %{}, do: {id, item}
+    else
+      other ->
+        warn(other, "Could not get media from the WordPress site's API at #{url}")
+        %{}
+    end
+  end
+
+  # every URL a media item has, with its width: the original and each size WordPress made of it
+  defp rest_sizes(item) do
+    details = if is_map(item["media_details"]), do: item["media_details"], else: %{}
+    sizes = if is_map(details["sizes"]), do: Map.values(details["sizes"]), else: []
+
+    [{item["source_url"], details["width"] || 100_000}] ++
+      for %{"source_url" => url} = size <- sizes, is_binary(url), do: {url, size["width"] || 0}
+  end
+
+  # the width of the size `url` shows, else the original's
+  defp shown_width(item, url) do
+    key = Bonfire.WordPress.Uploads.url_key(url)
+    [{_, original} | _] = sizes = rest_sizes(item)
+
+    Enum.find_value(sizes, original, fn {size_url, width} ->
+      if Bonfire.WordPress.Uploads.url_key(size_url) == key, do: width
+    end)
+  end
+
+  defp rest_upload(item, id, url, width) do
+    Bonfire.WordPress.Uploads.entry(%{
+      id: id,
+      url: url,
+      width: width,
+      media_type: item["mime_type"],
+      sizes: rest_sizes(item),
+      alt: item["alt_text"],
+      caption: get_in(item, ["caption", "rendered"]),
+      description: get_in(item, ["description", "rendered"]),
+      title: get_in(item, ["title", "rendered"])
+    })
   end
 
   # the post's categories, by name and slug, from its embedded terms (one list per taxonomy); tags and other taxonomies aren't used

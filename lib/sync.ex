@@ -75,6 +75,28 @@ defmodule Bonfire.WordPress.Sync do
     end
   end
 
+  @doc "Whether `site` was imported from an export, so a sync finds its uploads here and needn't ask its media API (see `mark_imported/1`)."
+  def imported?(site) do
+    case site_key(site) do
+      key when is_binary(key) ->
+        key in List.wrap(Config.get([:bonfire_wordpress, :imported_sites]))
+
+      _ ->
+        false
+    end
+  end
+
+  @doc "Records that `site` was imported from an export (see `imported?/1`)."
+  def mark_imported(site) do
+    with key when is_binary(key) <- site_key(site),
+         sites = List.wrap(Config.get([:bonfire_wordpress, :imported_sites])),
+         false <- key in sites do
+      put(imported_sites: [key | sites])
+    end
+
+    :ok
+  end
+
   @doc """
   Configures `site` as the instance's WordPress site, imported by `user`, if no site is configured yet or it's the same site. A different configured site is left as it is (returns `{:error, :other_site}`), so one import can't silently replace another's sync.
   """
@@ -142,6 +164,9 @@ defmodule Bonfire.WordPress.Sync do
          {:ok, posts} <- Bonfire.WordPress.API.changed_posts(site, last_sync()) do
       # into the configured group, in the topics its categories already have there: a sync never makes topics
       group_id = post_into_group()
+
+      # the images the posts show point at the site through this instance, as an import's do
+      Bonfire.WordPress.Posts.register_redir_storage(site)
 
       for post <- posts do
         # as the user an import recorded for its author on this site, else as the user whose import the site is

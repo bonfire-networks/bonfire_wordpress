@@ -14,6 +14,7 @@ defmodule Bonfire.WordPress.Import.WXR do
   import Untangle
 
   alias Bonfire.Common.Import
+  alias Bonfire.WordPress.Uploads
 
   # post types that import as posts (a podcast episode is a post with its audio attached), and the REST API's name for each
   @rest_types %{"post" => "posts", "podcast" => "podcast"}
@@ -48,7 +49,7 @@ defmodule Bonfire.WordPress.Import.WXR do
   def stage(path) when is_binary(path) do
     with {:ok, dir} <- Import.make_staging_dir(),
          :ok <- File.mkdir_p(Path.join(dir, "posts")),
-         :ok <- File.mkdir_p(Path.join(dir, "attachments")),
+         :ok <- File.mkdir_p(Path.join([dir, "attachments", "urls"])),
          {:ok, state} <- parse(path, dir) do
       File.write!(Path.join(dir, "authors.json"), Jason.encode!(state.authors))
       Import.enqueue_archive_cleanup(dir)
@@ -123,7 +124,7 @@ defmodule Bonfire.WordPress.Import.WXR do
     end
   end
 
-  # each attachment in its own file, so a job finds a post's featured image by id without reading the others
+  # each attachment in its own file, so a job finds a post's featured image by id without reading the others, and one small file per URL it has (its original and each size WordPress made of it), so a job finds the upload an image in a body shows from that image's URL
   @doc false
   def handle_item(%{"wp:post_type" => "attachment"} = item, state) do
     case post_id(item["wp:post_id"]) do
@@ -132,6 +133,14 @@ defmodule Bonfire.WordPress.Import.WXR do
 
       id ->
         File.write!(attachment_path(state.dir, id), Jason.encode!(item))
+
+        for {url, width} <- attachment_sizes(item), key = Uploads.url_key(url), key != nil do
+          File.write!(
+            url_index_path(state.dir, key),
+            Jason.encode!(%{"id" => id, "width" => width})
+          )
+        end
+
         count(state, :attachments)
     end
   end
@@ -352,6 +361,12 @@ defmodule Bonfire.WordPress.Import.WXR do
     end
 
     if :posts in keys do
+      # the images the posts show come in pointing at the site through this instance (see `Bonfire.WordPress.Posts.register_redir_storage/1`)
+      Bonfire.WordPress.Posts.register_redir_storage(site)
+
+      # its uploads come in with every URL of their sizes, so a later sync of the site finds them without asking it
+      Bonfire.WordPress.Sync.mark_imported(site)
+
       staged_posts = read_posts_index(dir)
 
       # the posts a previous import already brought in, found in one query, aren't queued again
@@ -443,6 +458,7 @@ defmodule Bonfire.WordPress.Import.WXR do
           # the post's author only when the import made users for them (see `materialize/3`), else the post is the importer's
           author: if(args["authors"] == true, do: author(dir, item["dc:creator"])),
           media: media(dir, item),
+          images: images(dir, body, args["site"]),
           categories: List.wrap(item["categories"])
         },
         current_user: opts[:current_user],
@@ -533,12 +549,9 @@ defmodule Bonfire.WordPress.Import.WXR do
       with id when is_integer(id) <- post_id(meta["_thumbnail_id"]),
            {:ok, attachment} <- read_json(attachment_path(dir, id)),
            url when is_binary(url) and url != "" <- attachment["wp:attachment_url"] do
-        %{
-          url: url,
-          media_type: media_type(url),
-          alt: blank_to_nil(get_in(attachment, ["meta", "_wp_attachment_image_alt"])),
-          primary?: true
-        }
+        attachment
+        |> upload(id, url, original_width(attachment))
+        |> Map.put(:primary?, true)
       else
         _ -> nil
       end
@@ -551,6 +564,110 @@ defmodule Bonfire.WordPress.Import.WXR do
 
     Enum.reject([featured, audio], &is_nil/1)
   end
+
+  # the uploads `html` shows (see `Bonfire.WordPress.Uploads`), each found among the export's attachments: by the `wp-image-<id>` class WordPress gives an image it inserts, else by its `src` (the URL of its original or of a size WordPress made of it, whatever the scheme, else its name without a `-WxH` size suffix). An image from elsewhere isn't one.
+  defp images(dir, html, site) when is_binary(html) do
+    html
+    |> Uploads.img_tags()
+    |> Enum.flat_map(fn {src, wp_id} ->
+      url = Uploads.absolute_url(src, site)
+
+      with {:ok, id, width} <- shown_upload(dir, url, wp_id),
+           {:ok, attachment} <- read_json(attachment_path(dir, id)) do
+        [{id, src, url || attachment["wp:attachment_url"], width, attachment}]
+      else
+        _ -> []
+      end
+    end)
+    |> Uploads.group(&upload/4)
+  end
+
+  defp images(_dir, _html, _site), do: []
+
+  # the upload an image shows, and the width it shows it at: the one its class names, when the export has it, else the one its URL is of
+  defp shown_upload(dir, url, wp_id) when is_integer(wp_id) do
+    with {:ok, attachment} <- read_json(attachment_path(dir, wp_id)) do
+      case url && find_upload(dir, url) do
+        {:ok, %{"id" => ^wp_id, "width" => width}} -> {:ok, wp_id, width}
+        _ -> {:ok, wp_id, original_width(attachment)}
+      end
+    else
+      _ -> shown_upload(dir, url, nil)
+    end
+  end
+
+  defp shown_upload(dir, url, _wp_id) when is_binary(url) do
+    case find_upload(dir, url) do
+      {:ok, %{"id" => id, "width" => width}} -> {:ok, id, width}
+      _ -> :none
+    end
+  end
+
+  defp shown_upload(_dir, _url, _wp_id), do: :none
+
+  # an upload as a post uses it, shown at `url` (`width` wide): see `Bonfire.WordPress.Uploads.entry/1`
+  defp upload(attachment, id, url, width) do
+    Uploads.entry(%{
+      id: id,
+      url: url,
+      width: width,
+      media_type: media_type(url),
+      sizes: attachment_sizes(attachment),
+      alt: get_in(attachment, ["meta", "_wp_attachment_image_alt"]),
+      caption: attachment["excerpt:encoded"],
+      description: attachment["content:encoded"],
+      title: attachment["title"]
+    })
+  end
+
+  # each URL an attachment has, with its width: the original (its width, when `_wp_attachment_metadata` says), and each size WordPress made of it, in the same folder
+  defp attachment_sizes(%{"wp:attachment_url" => url} = attachment)
+       when is_binary(url) and url != "" do
+    sizes =
+      ~r/s:4:"file";s:\d+:"([^"\/]+)";s:5:"width";i:(\d+);/
+      |> Regex.scan(get_in(attachment, ["meta", "_wp_attachment_metadata"]) || "",
+        capture: :all_but_first
+      )
+      |> Enum.map(fn [file, width] ->
+        {Path.dirname(url) <> "/" <> file, String.to_integer(width)}
+      end)
+
+    [{url, original_width(attachment)} | sizes]
+  end
+
+  defp attachment_sizes(_), do: []
+
+  # the original's width, else one wider than any size WordPress makes, so the original counts as the largest
+  defp original_width(attachment) do
+    case Regex.run(
+           ~r/^a:\d+:\{s:5:"width";i:(\d+);/,
+           get_in(attachment, ["meta", "_wp_attachment_metadata"]) || ""
+         ) do
+      [_, width] -> String.to_integer(width)
+      _ -> 100_000
+    end
+  end
+
+  defp find_upload(dir, url) do
+    with {:error, _} <- read_json(url_index_path(dir, Uploads.url_key(url))),
+         # a size the export doesn't list: its original, by the name without the size (eg. `a-640x480.png` of `a.png`)
+         [_, base, w, ext] <- Regex.run(~r/^(.+)-(\d+)x\d+(\.\w+)$/, url),
+         {:ok, found} <- read_json(url_index_path(dir, Uploads.url_key(base <> ext))) do
+      {:ok, Map.put(found, "width", String.to_integer(w))}
+    else
+      {:ok, found} -> {:ok, found}
+      _ -> :none
+    end
+  end
+
+  defp url_index_path(dir, key),
+    do:
+      Path.join([
+        dir,
+        "attachments",
+        "urls",
+        Base.url_encode64(:crypto.hash(:sha256, key || ""), padding: false) <> ".json"
+      ])
 
   # WordPress keeps an enclosure as "url\nlength\ntype", and an audio file as the URL alone
   defp first_line(value) when is_binary(value) do
