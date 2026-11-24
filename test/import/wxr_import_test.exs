@@ -241,6 +241,18 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
     assert content.html_body =~ ~s(href="#{@embed}")
     assert content.html_body =~ "A talk"
     assert @embed in Enum.map(media_of(id), & &1.path)
+
+    # and the body places it: the player renders where the iframe was, not in the attachment list
+    assert @embed in Enum.map(
+             Bonfire.Files.InlineMedia.placed(media_of(id), content.html_body),
+             & &1.path
+           )
+
+    assert {:url, @embed} in Bonfire.Common.Text.markdown_parts(
+             content.html_body,
+             MapSet.new([@embed]),
+             []
+           )
   end
 
   # posts counted by title, since a duplicate would share its link with the first
