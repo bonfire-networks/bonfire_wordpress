@@ -39,11 +39,22 @@ defmodule Bonfire.WordPress.API do
   @sync_types [{"posts", :required}, {"podcast", :optional}]
 
   @doc """
-  The posts and podcast episodes on `site` changed since `since` (a `DateTime`, or nil for all), as normalised posts for `Bonfire.WordPress.Posts.import_post/2`, paging 100 at a time. Authors are left out (the API names them by numeric id, not the export's logins), so they come in as whoever syncs.
+  The posts and podcast episodes on `site` changed since `since` (a `DateTime`, or nil for all), as normalised posts for `Bonfire.WordPress.Posts.import_post/2`, paging 100 at a time. Each post's author is only its id on the site, since the API gives no email.
   """
   def changed_posts(site, since) when is_binary(site) do
+    query =
+      %{
+        "orderby" => "modified",
+        "order" => "asc",
+        # the featured image and the post's terms (categories and tags, with their names) come embedded in the same answer; with `_fields`, an embed needs `_links` and `_embedded` listed too. `meta` holds a podcast's audio file and cover (Seriously Simple Podcasting), public like the rest
+        "_embed" => "wp:featuredmedia,wp:term",
+        "_fields" =>
+          "id,link,date_gmt,modified_gmt,title,content,author,featured_media,categories,meta,_links,_embedded"
+      }
+      |> then(&if since, do: Map.put(&1, "modified_after", DateTime.to_iso8601(since)), else: &1)
+
     Enum.reduce_while(@sync_types, {:ok, []}, fn {rest_type, need}, {:ok, acc} ->
-      case pages(site, rest_type, since, 1, []) do
+      case pages(site, rest_type, query, &normalise/1, 1, []) do
         {:ok, posts} -> {:cont, {:ok, acc ++ posts}}
         _ when need == :optional -> {:cont, {:ok, acc}}
         e -> {:halt, e}
@@ -51,34 +62,41 @@ defmodule Bonfire.WordPress.API do
     end)
   end
 
-  defp pages(site, rest_type, since, page, acc) do
-    query =
-      %{
-        "per_page" => @per_page,
-        "page" => page,
-        "orderby" => "modified",
-        "order" => "asc",
-        # the featured image comes embedded in the same answer; with `_fields`, an embed needs `_links` and `_embedded` listed too. `meta` holds a podcast's audio file and cover (Seriously Simple Podcasting), public like the rest
-        "_embed" => "wp:featuredmedia",
-        "_fields" =>
-          "id,link,date_gmt,modified_gmt,title,content,featured_media,meta,_links,_embedded"
-      }
-      |> then(&if since, do: Map.put(&1, "modified_after", DateTime.to_iso8601(since)), else: &1)
+  @doc """
+  The links of every post and podcast episode `site` publishes, paging 100 at a time (ids and links only), for telling which imported posts it no longer has. An error unless the whole list was had: a site without the podcast plugin has no podcast route (a 404), but any other failure leaves the list incomplete.
+  """
+  def published_links(site) when is_binary(site) do
+    query = %{"orderby" => "id", "order" => "asc", "_fields" => "id,link"}
 
+    Enum.reduce_while(@sync_types, {:ok, []}, fn {rest_type, need}, {:ok, acc} ->
+      case pages(site, rest_type, query, & &1["link"], 1, []) do
+        {:ok, links} -> {:cont, {:ok, acc ++ Enum.filter(links, &is_binary/1)}}
+        {:error, {:http_status, 404}} when need == :optional -> {:cont, {:ok, acc}}
+        e -> {:halt, e}
+      end
+    end)
+  end
+
+  # every page of a REST type's posts with `query`, each made into what `fun` returns
+  defp pages(site, rest_type, query, fun, page, acc) do
     url =
       "#{String.trim_trailing(site, "/")}/wp-json/wp/v2/#{URI.encode(rest_type)}?" <>
-        URI.encode_query(query)
+        URI.encode_query(Map.merge(query, %{"per_page" => @per_page, "page" => page}))
 
     with {:ok, %{status: 200, body: body} = env} <- Bonfire.Common.HTTP.get(url),
          {:ok, posts} when is_list(posts) <- decode(body) do
-      acc = acc ++ Enum.map(posts, &normalise/1)
+      acc = acc ++ Enum.map(posts, fun)
 
       if length(posts) < @per_page or page >= total_pages(env),
         do: {:ok, acc},
-        else: pages(site, rest_type, since, page + 1, acc)
+        else: pages(site, rest_type, query, fun, page + 1, acc)
     else
-      {:ok, %{status: status}} -> error(status, "The WordPress site's API answered #{url} with")
-      other -> error(other, "Could not get changed posts from the WordPress site's API at #{url}")
+      {:ok, %{status: status}} ->
+        warn(status, "The WordPress site's API answered #{url} with")
+        {:error, {:http_status, status}}
+
+      other ->
+        error(other, "Could not get posts from the WordPress site's API at #{url}")
     end
   end
 
@@ -100,11 +118,23 @@ defmodule Bonfire.WordPress.API do
       link: post["link"],
       published_at: gmt(post["date_gmt"]),
       html: get_in(post, ["content", "rendered"]),
-      author: nil,
+      # by id only: the API never gives an author's email, so the user is the one an import recorded for that id (see `Bonfire.WordPress.Identities`)
+      author: if(is_integer(post["author"]) and post["author"] > 0, do: %{id: post["author"]}),
       password_protected?: get_in(post, ["content", "protected"]) == true,
-      media: media(post)
+      media: media(post),
+      categories: categories(post)
     }
   end
+
+  # the post's categories, by name and slug, from its embedded terms (one list per taxonomy); tags and other taxonomies aren't used
+  defp categories(%{"_embedded" => %{"wp:term" => taxonomies}}) when is_list(taxonomies) do
+    for terms when is_list(terms) <- taxonomies,
+        %{"taxonomy" => "category", "name" => name} = term <- terms,
+        is_binary(name) and name != "",
+        do: %{name: name, slug: term["slug"]}
+  end
+
+  defp categories(_), do: []
 
   # the post's featured image as its primary image, else a podcast's cover, plus a podcast's audio file. Only addresses: nothing is fetched
   defp media(post) do

@@ -1,0 +1,84 @@
+<div class="space-y-4">
+  {#if !@authorized}
+    <div class="rounded-box border border-divider bg-base-100 p-6 flex items-start gap-3">
+      <#Icon iconify="ph:lock-simple" class="size-5 text-muted shrink-0" />
+      <div>
+        <h3 class="font-medium">{l("Admins only")}</h3>
+        <p class="text-sm text-muted">{l("You need permission to manage this instance to view the WordPress settings.")}</p>
+      </div>
+    </div>
+  {#else}
+    <section class="rounded-box border border-divider bg-base-100">
+      <div class="flex items-center gap-2 p-4 border-b border-divider">
+        <#Icon iconify="bi:wordpress" class="size-5 text-muted" />
+        <h3 class="font-bold text-base">{l("Site")}</h3>
+      </div>
+
+      <div class="p-4 space-y-4">
+        <form data-role="site_url_form" phx-submit="Bonfire.Common.Settings:save">
+          <Bonfire.UI.Common.SettingsInputLive
+            keys={[:bonfire_wordpress, :site_url]}
+            scope={:instance}
+            current_value={@site_url}
+            name={l("Site address")}
+            description={l(
+              "The WordPress site this instance keeps in sync. Importing a site's export file as an admin sets it, if none is set yet."
+            )}
+            placeholder="https://example.com"
+            class="input input-bordered input-sm flex-1"
+          />
+        </form>
+
+        <form data-role="import_author_form" phx-submit="Bonfire.Common.Settings:save">
+          <Bonfire.UI.Common.SettingsInputLive
+            keys={[:bonfire_wordpress, :auto_import_as]}
+            scope={:instance}
+            current_value={@auto_import_as}
+            name={l("Import as")}
+            description={l("ID of the user whose import the site is. New posts from the site come in as this user.")}
+            placeholder="user ID"
+            class="input input-bordered input-sm flex-1"
+          />
+        </form>
+        <p data-role="import_author" class="text-sm text-muted">
+          {#if @import_author}
+            {l("Posts come in as")}
+            <span class="text-base-content">{e(@import_author, :profile, :name, nil)} @{e(@import_author, :character, :username, nil)}</span>
+          {#else}
+            {l("No user set: posts from the site aren't imported.")}
+          {/if}
+        </p>
+
+        <form data-role="group_form" phx-change="Bonfire.Common.Settings:set">
+          <Bonfire.UI.Common.SettingsSelectLive
+            id="wordpress_post_into_group"
+            keys={[:bonfire_wordpress, :post_into_group]}
+            scope={:instance}
+            current_value={@post_into_group || ""}
+            options={@group_options}
+            name={l("Post into group")}
+            label_name={l("Post into group")}
+            description={l(
+              "The site's posts go into this group, each into the topic named after its first category, created on import if missing."
+            )}
+          />
+        </form>
+
+        <div class="divider my-0" />
+
+        <div class="flex flex-col gap-0.5">
+          <span class="text-sm font-medium">{l("Last sync")}</span>
+          <span data-role="last_sync" class="text-sm text-muted">{format_last_sync(@last_sync) || l("Never")}</span>
+        </div>
+
+        <div class="flex flex-col gap-0.5">
+          <span class="text-sm font-medium">{l("Ping address")}</span>
+          <span class="text-sm text-muted">{l(
+              "Add this address to the site's Settings > Writing, under Update Services, so it tells this instance when a post is published or edited."
+            )}</span>
+          <code data-role="ping_url" class="text-sm text-base-content break-all">{@ping_url}</code>
+        </div>
+      </div>
+    </section>
+  {/if}
+</div>

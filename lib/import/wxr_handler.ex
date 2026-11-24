@@ -24,6 +24,10 @@ defmodule Bonfire.WordPress.Import.WXR.Handler do
   def handle_event(:start_element, {"wp:author", _attrs}, %{item: nil} = state),
     do: {:ok, %{state | author: %{}, text: []}}
 
+  # a post's term (a category, tag, series, or a file's media category), named by its `domain` attribute, with its slug in `nicename`
+  def handle_event(:start_element, {"category", attrs}, %{item: item} = state) when is_map(item),
+    do: {:ok, %{state | category: Map.new(attrs), text: []}}
+
   def handle_event(:start_element, _element, state), do: {:ok, %{state | text: []}}
 
   def handle_event(:characters, chars, state), do: {:ok, %{state | text: [state.text | chars]}}
@@ -44,6 +48,26 @@ defmodule Bonfire.WordPress.Import.WXR.Handler do
   def handle_event(:end_element, "wp:postmeta", %{item: item, meta_key: key} = state)
       when is_map(item) and is_binary(key),
       do: {:ok, %{state | item: put_in(item, ["meta", key], state.meta_value)}}
+
+  # only categories are kept, in the file's order: they place a post in topics, tags and the rest don't
+  def handle_event(
+        :end_element,
+        "category",
+        %{item: item, category: %{"domain" => "category", "nicename" => slug}} = state
+      )
+      when is_map(item) do
+    category = %{"name" => text(state), "slug" => slug}
+
+    {:ok,
+     %{
+       state
+       | category: nil,
+         item: Map.update(item, "categories", [category], &(&1 ++ [category]))
+     }}
+  end
+
+  def handle_event(:end_element, "category", %{item: item} = state) when is_map(item),
+    do: {:ok, %{state | category: nil}}
 
   def handle_event(:end_element, name, %{item: item} = state) when is_map(item) do
     if WXR.item_field?(name),
@@ -66,7 +90,12 @@ defmodule Bonfire.WordPress.Import.WXR.Handler do
 
   def handle_event(:end_element, name, %{author: author} = state)
       when is_map(author) and
-             name in ["wp:author_login", "wp:author_email", "wp:author_display_name"],
+             name in [
+               "wp:author_id",
+               "wp:author_login",
+               "wp:author_email",
+               "wp:author_display_name"
+             ],
       do: {:ok, %{state | author: Map.put(author, name, text(state))}}
 
   def handle_event(:end_element, _name, state), do: {:ok, state}

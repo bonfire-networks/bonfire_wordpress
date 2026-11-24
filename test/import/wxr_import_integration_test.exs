@@ -61,6 +61,7 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
     Ecto.Adapters.SQL.Sandbox.mode(repo, {:shared, self()})
 
     {:ok, media_requests} = Agent.start_link(fn -> [] end)
+    {:ok, rest_statuses} = Agent.start_link(fn -> [] end)
 
     # every request goes through this mock, also when live: tests can't reach the network through Tesla (its adapter is the mock, and the SSRF guard's test resolver points every host at a placeholder address)
     Tesla.Mock.mock_global(fn
@@ -73,7 +74,9 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
 
           # the site's REST API: fetched for real when live, else unavailable, so each body comes from the export
           String.contains?(url, "/wp-json/") ->
-            if live?(), do: live_get(env), else: %Tesla.Env{status: 500, body: ""}
+            response = if live?(), do: live_get(env), else: %Tesla.Env{status: 500, body: ""}
+            Agent.update(rest_statuses, &[response.status | &1])
+            response
 
           # anything else, eg. unfurling an embedded player: no network, so it falls back to a bare link
           true ->
@@ -81,11 +84,12 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
         end
     end)
 
-    {:ok, media_requests: media_requests}
+    {:ok, media_requests: media_requests, rest_statuses: rest_statuses}
   end
 
   test "a whole export imports every published post, with memory in check", %{
-    media_requests: media_requests
+    media_requests: media_requests,
+    rest_statuses: rest_statuses
   } do
     path = export_path()
     expected = scan(path)
@@ -164,6 +168,28 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
     assert failures == []
 
     assert Agent.get(media_requests, & &1) == []
+
+    if live?(), do: assert_bodies_from_the_site(staged.dir, Agent.get(rest_statuses, & &1))
+  end
+
+  # live, every body came from the site's REST API, none from the export: one successful request per chunk of the staged posts (each chunk's first job fetches it and caches its bodies), no chunk marked failed, and a cached body for every post
+  defp assert_bodies_from_the_site(dir, rest_statuses) do
+    chunks = dir |> Path.join("chunks.json") |> File.read!() |> Jason.decode!()
+    chunk_count = chunks |> Map.values() |> Enum.map(&length/1) |> Enum.sum()
+    ids = chunks |> Map.values() |> List.flatten() |> List.flatten()
+
+    ok = Enum.count(rest_statuses, &(&1 == 200))
+
+    report("REST bodies", %{chunks: chunk_count, ok_requests: ok, requests: length(rest_statuses)})
+
+    assert ok == chunk_count
+    assert length(rest_statuses) == chunk_count
+    assert File.ls(Path.join(dir, "failed")) in [{:error, :enoent}, {:ok, []}]
+
+    missing = Enum.reject(ids, &File.exists?(Path.join([dir, "bodies", "#{&1}.html"])))
+
+    assert missing == [],
+           "#{length(missing)} posts fell back to the export's body, eg. #{inspect(Enum.take(missing, 5))}"
   end
 
   # The file's own counts, by an independent pass over its lines (an export puts each of these elements on a line of its own): published posts and podcast episodes without a password are imported, published pages listed apart, and the rest left out by status (for a post, page or podcast) or by type.

@@ -6,9 +6,9 @@ defmodule Bonfire.WordPress do
   import Bonfire.Common.Modularity.DeclareHelpers
 
   declare_extension(
-    l("WordPress"),
+    l("WordPress integration"),
     icon: "bi:wordpress",
-    description: l("Import a WordPress site from its export file")
+    description: l("Import content from a WordPress site")
   )
 
   def repo, do: Config.repo()

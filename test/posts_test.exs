@@ -141,6 +141,34 @@ defmodule Bonfire.WordPress.PostsTest do
     assert media_type =~ "audio"
   end
 
+  # a podcast's body often has a player for the same file the episode attaches: the player keeps its place as a link, and the file is attached once
+  test "an audio player in the body for the episode's own file stays a link, and the file is attached once",
+       %{me: me} do
+    audio = "https://blog.example.local/wp-content/uploads/an-episode.mp3"
+
+    post =
+      post(%{
+        link: "https://blog.example.local/an-episode/",
+        html: ~s(<p>This week's episode</p><audio controls src="#{audio}"></audio>),
+        media: [%{url: audio, media_type: "audio/mpeg", alt: nil, primary?: false}]
+      })
+
+    assert {:ok, _} = Posts.import_post(post, current_user: me)
+    %{id: id, content: content} = imported(post.link)
+
+    assert content.html_body =~ ~s(href="#{audio}")
+
+    assert {:ok, imported} = Bonfire.Common.Needles.get(id, skip_boundary_check: true)
+
+    paths =
+      imported
+      |> Repo.preload([files: :media], force: true)
+      |> Map.get(:files)
+      |> Enum.map(& &1.media.path)
+
+    assert Enum.count(paths, &(&1 == audio)) == 1
+  end
+
   # an imported body unfurls as any post does: a bare URL in its text gets a preview, a link inside `<a href>` doesn't. The links use a real TLD, since link detection ignores `.local` hosts (mocked, so nothing leaves the machine)
   test "in an imported body, a bare URL is unfurled as in any post, a link inside <a href> isn't",
        %{me: me} do

@@ -130,7 +130,8 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
   defp primary_image?(_), do: false
 
   defp import_posts(me, opts \\ []) do
-    assert {:ok, staged} = WXR.stage(@fixture)
+    {fixture, opts} = Keyword.pop(opts, :fixture, @fixture)
+    assert {:ok, staged} = WXR.stage(fixture)
     on_exit(fn -> File.rm_rf(staged.dir) end)
 
     assert {:ok, report} = Import.import_staged(me, staged, [only: [:posts]] ++ opts)
@@ -204,6 +205,29 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
 
     # the authors' new accounts are made quietly, for them to claim later
     assert_no_email_sent()
+  end
+
+  # the site's REST API names authors by id, not email, so the import records which user each author id became, for a sync to find
+  test "an import that makes users for the site's authors records which user each author id is, once" do
+    me = Bonfire.UI.Common.Testing.Helpers.fake_admin!()
+    import_posts(me, create_author_users: true)
+
+    # the authors of the imported posts, by their id in the export
+    for {author_id, email} <- [
+          {"16", "john-anderson@totnespulse.local"},
+          {"11", "the-totnes-pulse@totnespulse.local"},
+          {"104", "tony-gee@totnespulse.local"}
+        ] do
+      [%{id: user_id}] = Bonfire.Me.Users.by_account!(Bonfire.Me.Accounts.get_by_email(email))
+
+      assert %{id: ^user_id} =
+               Bonfire.WordPress.Identities.user_for("https://www.totnespulse.local", author_id)
+    end
+
+    # importing again records nothing more
+    import_posts(me, create_author_users: true)
+
+    assert Repo.aggregate(Bonfire.WordPress.Identities.AuthorIdentity, :count) == 3
   end
 
   # an iframe can't come in (the sanitiser drops it), so the player is kept as a link in the body and as a link attached to the post, which shows as a preview or player here
@@ -331,6 +355,274 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
            )
 
     assert Agent.get(media_requests, & &1) == []
+  end
+
+  describe "into a group" do
+    # the categories of the fixture's posts, by post: 27531 is in four, 3264 in three, 3060 in two, and the podcast episode in none
+    @topic_names ["News", "People", "Perspectives", "Pulse", "Totnes Town"]
+
+    setup do
+      admin = Bonfire.UI.Common.Testing.Helpers.fake_admin!()
+      creator = fake_user!()
+
+      group =
+        Bonfire.Classify.Simulate.fake_group!(creator, %{
+          membership: "local:members",
+          visibility: "nonfederated",
+          participation: "anyone"
+        })
+
+      {:ok, admin: admin, creator: creator, group: group}
+    end
+
+    defp topics_in(group) do
+      Bonfire.Classify.Categories.list(
+        [:default, parent_category: group.id, type: :topic],
+        skip_boundary_check: true,
+        limit: 50
+      )
+      |> Map.get(:edges, [])
+    end
+
+    defp topic_named(group, name), do: Enum.find(topics_in(group), &(&1.name == name))
+
+    defp in_feed_of?(post_id, category, viewer) do
+      {:ok, post} = Bonfire.Common.Needles.get(post_id, skip_boundary_check: true)
+
+      Bonfire.Social.FeedLoader.feed_contains?(:user_activities, post,
+        by: category,
+        current_user: viewer
+      )
+    end
+
+    test "each post goes into the topic for its first category, made in the group when it isn't there, and is boosted into its other categories' topics",
+         %{admin: admin, creator: creator, group: group} do
+      report = import_posts(admin, post_into_group: group.id)
+
+      assert Enum.sort(Enum.map(topics_in(group), & &1.name)) == @topic_names
+      assert Enum.any?(report.notes, &(&1.reason =~ "5 created"))
+
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 27531)).link)
+      assert in_feed_of?(id, topic_named(group, "People"), creator)
+
+      for name <- ["Perspectives", "Pulse", "Totnes Town"],
+          do: assert(in_feed_of?(id, topic_named(group, name), creator), "not in #{name}")
+
+      # a post with no category goes into the group itself
+      %{id: podcast_id} = imported(Enum.find(@posts, &(&1.id == 16404)).link)
+      assert in_feed_of?(podcast_id, group, creator)
+    end
+
+    # a topic is found by its name, as the category is named on the site, not by its address here (which may differ)
+    test "a topic already in the group is used, not made again", %{
+      admin: admin,
+      creator: creator,
+      group: group
+    } do
+      existing =
+        Bonfire.Classify.Simulate.fake_category!(creator, group, %{
+          type: :topic,
+          name: "Totnes Town"
+        })
+
+      report = import_posts(admin, post_into_group: group.id)
+
+      assert Enum.count(topics_in(group), &(&1.name == "Totnes Town")) == 1
+      assert Enum.any?(report.notes, &(&1.reason =~ "4 created"))
+
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 3060)).link)
+      assert in_feed_of?(id, existing, creator)
+    end
+
+    # an instance moderator (not an admin, not in the group) importing as themselves is made a member and allowed to post in the group's existing topics, as an admin is; they may not make topics, so the others aren't made
+    test "an instance moderator who isn't an admin is put in the group's existing topics", %{
+      me: me,
+      creator: creator,
+      group: group
+    } do
+      moderator = Bonfire.Me.Fake.instance_moderator!(me)
+      refute Bonfire.Me.Accounts.is_admin?(moderator)
+
+      existing =
+        Bonfire.Classify.Simulate.fake_category!(creator, group, %{
+          type: :topic,
+          name: "Totnes Town"
+        })
+
+      import_posts(moderator, post_into_group: group.id)
+
+      # its first category ("News") has no topic, and none is made, so it goes in the next one's
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 3060)).link)
+      assert in_feed_of?(id, existing, creator)
+      assert Enum.map(topics_in(group), & &1.id) == [existing.id]
+    end
+
+    test "a topic with the same name in another group isn't used", %{
+      admin: admin,
+      creator: creator,
+      group: group
+    } do
+      other_group =
+        Bonfire.Classify.Simulate.fake_group!(creator, %{
+          membership: "local:members",
+          visibility: "nonfederated",
+          participation: "anyone"
+        })
+
+      elsewhere =
+        Bonfire.Classify.Simulate.fake_category!(creator, other_group, %{
+          type: :topic,
+          name: "News"
+        })
+
+      import_posts(admin, post_into_group: group.id)
+
+      assert %{} = news = topic_named(group, "News")
+      refute news.id == elsewhere.id
+
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 3264)).link)
+      assert in_feed_of?(id, news, creator)
+      refute in_feed_of?(id, elsewhere, creator)
+    end
+
+    # the group the instance's WordPress site posts into, as its sync does, unless the import names another
+    test "with no group asked for, an admin's import goes into the configured group", %{
+      admin: admin,
+      creator: creator,
+      group: group
+    } do
+      Process.put([:bonfire_wordpress, :post_into_group], group.id)
+      import_posts(admin)
+
+      assert length(topics_in(group)) == 5
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 16404)).link)
+      assert in_feed_of?(id, group, creator)
+    end
+
+    test "a group asked for wins over the configured one", %{admin: admin, group: group} do
+      configured =
+        Bonfire.Classify.Simulate.fake_group!(fake_user!(), %{
+          membership: "local:members",
+          visibility: "nonfederated",
+          participation: "anyone"
+        })
+
+      Process.put([:bonfire_wordpress, :post_into_group], configured.id)
+      import_posts(admin, post_into_group: group.id)
+
+      assert length(topics_in(group)) == 5
+      assert topics_in(configured) == []
+    end
+
+    # a group only its members may post in, so who imports decides whether posts go there
+    defp members_group(creator),
+      do:
+        Bonfire.Classify.Simulate.fake_group!(creator, %{
+          membership: "local:members",
+          visibility: "nonfederated",
+          participation: "group_members"
+        })
+
+    # anyone who can post in the group can import into it, but only those who may make topics there get them made: a member's posts go into the group itself
+    test "a member who can't make topics imports into the group, and the report says why no topics were made",
+         %{me: me, creator: creator} do
+      group = members_group(creator)
+      assert {:ok, _} = Bonfire.Classify.Categories.join_group(me, group)
+
+      report = import_posts(me, post_into_group: group.id)
+
+      assert topics_in(group) == []
+      assert Enum.any?(report.notes, &(&1.key =~ "Topics" and &1.reason =~ "5 not created"))
+
+      for %{link: link} <- @posts do
+        %{id: id} = imported(link)
+        assert in_feed_of?(id, group, creator)
+      end
+    end
+
+    # the control for the test below: the same group, imported into by its creator, who may make topics (and isn't an admin)
+    test "the group's creator imports into it, with its topics made", %{creator: creator} do
+      group = members_group(creator)
+
+      report = import_posts(creator, post_into_group: group.id)
+
+      assert length(topics_in(group)) == 5
+      assert Enum.any?(report.notes, &(&1.key =~ "Topics" and &1.reason =~ "5 created"))
+
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 27531)).link)
+      assert in_feed_of?(id, topic_named(group, "People"), creator)
+    end
+
+    test "someone who can't post in the group still gets their posts, but not in the group, and the report says why",
+         %{me: me, creator: creator} do
+      group = members_group(creator)
+
+      report = import_posts(me, post_into_group: group.id)
+
+      assert topics_in(group) == []
+      assert Enum.any?(report.notes, &(&1.reason =~ "no permission to post"))
+
+      for %{link: link} <- @posts do
+        %{id: id} = imported(link)
+        refute in_feed_of?(id, group, creator)
+      end
+    end
+
+    # WordPress stores a term's name HTML-encoded and exports it as stored (`<![CDATA[Totnes &amp; Town]]>`), and a site's slugs can be edited: the group's topic with the name as it reads is used, not made again
+    test "a category whose name the export holds HTML-encoded goes into the topic named as it reads",
+         %{admin: admin, creator: creator, group: group} do
+      existing =
+        Bonfire.Classify.Simulate.fake_category!(creator, group, %{
+          type: :topic,
+          name: "Totnes & Town"
+        })
+
+      encoded =
+        Path.join(System.tmp_dir!(), "wxr-encoded-#{System.unique_integer([:positive])}.xml")
+
+      File.write!(
+        encoded,
+        @fixture
+        |> File.read!()
+        |> String.replace(
+          ~s(nicename="totnes-town"><![CDATA[Totnes Town]]>),
+          ~s(nicename="town-matters"><![CDATA[Totnes &amp; Town]]>)
+        )
+      )
+
+      on_exit(fn -> File.rm(encoded) end)
+
+      import_posts(admin, post_into_group: group.id, fixture: encoded)
+
+      names = Enum.map(topics_in(group), & &1.name)
+      assert Enum.count(names, &(&1 == "Totnes & Town")) == 1
+      refute Enum.any?(names, &(&1 =~ "&amp;"))
+
+      # 3060's categories are News, then Totnes Town: boosted into the existing topic
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 3060)).link)
+      assert in_feed_of?(id, existing, creator)
+    end
+
+    test "importing again makes no more topics", %{admin: admin, group: group} do
+      import_posts(admin, post_into_group: group.id)
+      second = import_posts(admin, post_into_group: group.id)
+
+      assert length(topics_in(group)) == 5
+      refute Enum.any?(second.notes, &(&1.reason =~ "created" and &1.key =~ "Topics"))
+    end
+
+    # without a group, the same import makes no topics and places nothing (the first test in this block shows the same checks passing with a group)
+    test "without a group, no topics are made and posts go in no group", %{
+      admin: admin,
+      creator: creator,
+      group: group
+    } do
+      import_posts(admin)
+
+      assert topics_in(group) == []
+      %{id: id} = imported(Enum.find(@posts, &(&1.id == 16404)).link)
+      refute in_feed_of?(id, group, creator)
+    end
   end
 
   # the site is down or its API blocked: each post still comes in, with the body the export holds (as stored, so block comments go and shortcodes stay as text), and the failed request isn't repeated for every post of its chunk

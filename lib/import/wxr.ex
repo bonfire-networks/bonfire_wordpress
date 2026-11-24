@@ -106,6 +106,7 @@ defmodule Bonfire.WordPress.Import.WXR do
       meta_key: nil,
       meta_value: nil,
       in_comment?: false,
+      category: nil,
       author: nil,
       authors: %{},
       base_site_url: nil,
@@ -157,7 +158,8 @@ defmodule Bonfire.WordPress.Import.WXR do
           "id" => id,
           "type" => type,
           "link" => item["link"],
-          "creator" => item["dc:creator"]
+          "creator" => item["dc:creator"],
+          "categories" => item["categories"] || []
         })
         |> count(:posts)
     end
@@ -287,6 +289,34 @@ defmodule Bonfire.WordPress.Import.WXR do
     [%{key: l("Authors"), reason: text}]
   end
 
+  # a report line when a group was asked for (or configured) but the importer can't post in it, so the posts come in outside it
+  defp group_lines(asked, nil) when is_binary(asked),
+    do: [%{key: l("Group"), reason: l("posts not put in it, no permission to post there")}]
+
+  defp group_lines(_asked, _group_id), do: []
+
+  # one report line for the topics made in the group for the posts' categories, and the ones not made since the importer may not make topics there
+  defp topics_lines(%{created: created, not_created: not_created}) do
+    text =
+      [
+        if(created != [],
+          do: lp("%{count} created", "%{count} created", length(created), count: length(created))
+        ),
+        if(not_created > 0,
+          do:
+            lp(
+              "%{count} not created, no permission to make topics in the group",
+              "%{count} not created, no permission to make topics in the group",
+              not_created,
+              count: not_created
+            )
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    if text == [], do: [], else: [%{key: l("Topics"), reason: Enum.join(text, ", ")}]
+  end
+
   defp not_imported_label("draft"), do: l("Drafts")
   defp not_imported_label("pending"), do: l("Pending posts")
   defp not_imported_label("private"), do: l("Private posts")
@@ -303,6 +333,15 @@ defmodule Bonfire.WordPress.Import.WXR do
     # a user for each author only when asked for, and only by an instance admin (checked here too, since the form's options can't be trusted); otherwise every post is the importer's
     author_users? =
       opts[:create_author_users] == true and Import.instance_admin?(opts[:current_user])
+
+    # the group the posts go into: the one asked for, else the one the instance's WordPress site posts into (as its sync does), for anyone who can post there (see `Bonfire.WordPress.Posts.can_post_in?/2`)
+    asked_group_id =
+      blank_to_nil(opts[:post_into_group]) || Bonfire.WordPress.Sync.post_into_group()
+
+    group_id =
+      if asked_group_id &&
+           Bonfire.WordPress.Posts.can_post_in?(opts[:current_user], asked_group_id),
+         do: asked_group_id
 
     # an admin's import makes this the instance's WordPress site to keep in sync (see `Bonfire.WordPress.Sync`), unless another site is configured already; it's instance config, so not anyone's import
     if :posts in keys and Import.instance_admin?(opts[:current_user]) do
@@ -342,7 +381,8 @@ defmodule Bonfire.WordPress.Import.WXR do
               "wp_id" => post["id"],
               "rest_type" => rest_type,
               "chunk" => Enum.find_index(chunks[rest_type], &(post["id"] in &1)),
-              "authors" => author_users?
+              "authors" => author_users?,
+              "group_id" => group_id
             }
           }
         end
@@ -356,15 +396,25 @@ defmodule Bonfire.WordPress.Import.WXR do
           |> Enum.map(&author_from(export_authors, &1["creator"]))
           |> Enum.reject(&is_nil/1)
           |> Enum.uniq_by(& &1.email)
-          |> Bonfire.WordPress.Posts.ensure_authors()
+          |> Bonfire.WordPress.Posts.ensure_authors(site)
         else
           %{created: [], matched: []}
         end
 
+      # the group's topics for these posts' categories, made once here rather than by each post's job (which then finds them), so two jobs can't make the same topic
+      topics =
+        Bonfire.WordPress.Posts.ensure_topics(
+          group_id,
+          Enum.flat_map(posts, &List.wrap(&1["categories"])),
+          opts[:current_user]
+        )
+
       {:ok,
        %{
          jobs: jobs,
-         notes: authors_lines(authors),
+         notes:
+           authors_lines(authors) ++
+             group_lines(asked_group_id, group_id) ++ topics_lines(topics),
          skipped: already_lines(already) ++ not_imported
        }}
     else
@@ -392,9 +442,12 @@ defmodule Bonfire.WordPress.Import.WXR do
           html: body,
           # the post's author only when the import made users for them (see `materialize/3`), else the post is the importer's
           author: if(args["authors"] == true, do: author(dir, item["dc:creator"])),
-          media: media(dir, item)
+          media: media(dir, item),
+          categories: List.wrap(item["categories"])
         },
-        current_user: opts[:current_user]
+        current_user: opts[:current_user],
+        post_into_group: args["group_id"],
+        site: args["site"]
       )
     else
       {:error, _} = e -> e
@@ -459,6 +512,7 @@ defmodule Bonfire.WordPress.Import.WXR do
     case authors do
       %{^login => author} ->
         %{
+          id: author["wp:author_id"],
           login: login,
           email: author["wp:author_email"],
           display_name: author["wp:author_display_name"]
