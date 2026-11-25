@@ -67,7 +67,8 @@ defmodule Bonfire.WordPress.PostsTest do
     assert {:ok, _} = Posts.import_post(post, current_user: me)
     body = imported(post.link).content.html_body
 
-    assert body =~ ~s|<figure class="wp-block-image alignleft">|
+    # `size-large` too: the size the author picked is kept (WordPress's `size-*` classes are allowed)
+    assert body =~ ~s|<figure class="wp-block-image size-large alignleft">|
     assert body =~ ~s|<figcaption class="wp-element-caption">The market</figcaption>|
     assert body =~ "Outro"
     refute body =~ "<script"

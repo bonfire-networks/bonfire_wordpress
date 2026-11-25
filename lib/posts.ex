@@ -644,6 +644,9 @@ defmodule Bonfire.WordPress.Posts do
   defp upload_media(author, uploads, site) do
     storage = redir_storage(site)
 
+    # each `Media` gets a locator in the site's storage, whose URL can only be built once that storage is configured: done here so any caller of `import_post/2` works, not only the sync and the export import (a config read, written only the first time)
+    if uploads != [], do: register_redir_storage(site)
+
     for upload <- uploads,
         {:ok, media} <- [media_for_upload(author, upload, storage)],
         do: {upload, media}
