@@ -314,7 +314,10 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
 
     # the stored files are removed afterwards, wherever they got to
     on_exit(fn ->
-      for m <- media, id = locator_id(m), is_binary(id), do: File.rm(Entrepot.Storages.Disk.path(id))
+      for m <- media,
+          id = locator_id(m),
+          is_binary(id),
+          do: File.rm(Entrepot.Storages.Disk.path(id))
     end)
 
     case uploads_folder(media) do
@@ -329,7 +332,8 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
   end
 
   defp check_takeover(site, key, {:ok, %{stored: stored, not_stored: not_stored}}, us, media) do
-    aliased? = Bonfire.Files.redir_storages()[key] == {:alias, Bonfire.Files.default_storage_name()}
+    aliased? =
+      Bonfire.Files.redir_storages()[key] == {:alias, Bonfire.Files.default_storage_name()}
 
     reasons =
       not_stored |> Enum.frequencies_by(&describe(&1.reason)) |> Enum.sort_by(&(-elem(&1, 1)))
@@ -360,7 +364,8 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
     |> Kernel.++(marker_problems)
   end
 
-  defp check_takeover(_site, _key, other, _us, _media), do: ["takeover failed: #{describe(other)}"]
+  defp check_takeover(_site, _key, other, _us, _media),
+    do: ["takeover failed: #{describe(other)}"]
 
   # A sample of the markers in the site's bodies: one of a stored media leads to the file here, one of a media not stored still leads to the site
   defp check_markers(site, key, stored_ids) do
@@ -392,11 +397,20 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
         stored? = MapSet.member?(stored_ids, String.replace_prefix(marker, prefix, ""))
 
         cond do
-          conn.status != 302 -> {:bad, "a marker gave #{conn.status}"}
-          stored? and location =~ host -> {:bad, "a stored media's marker still leads to the site"}
-          stored? and not String.contains?(location, String.replace_prefix(marker, prefix, "")) -> {:bad, "a stored media's marker leads elsewhere than its file"}
-          not stored? and not (location =~ host) -> {:bad, "a media not stored leads somewhere other than the site"}
-          true -> :ok
+          conn.status != 302 ->
+            {:bad, "a marker gave #{conn.status}"}
+
+          stored? and location =~ host ->
+            {:bad, "a stored media's marker still leads to the site"}
+
+          stored? and not String.contains?(location, String.replace_prefix(marker, prefix, "")) ->
+            {:bad, "a stored media's marker leads elsewhere than its file"}
+
+          not stored? and not (location =~ host) ->
+            {:bad, "a media not stored leads somewhere other than the site"}
+
+          true ->
+            :ok
         end
       end
 
@@ -425,7 +439,10 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
 
       live?() ->
         {:ok, _} = Application.ensure_all_started([:inets, :ssl])
-        folder = Path.join(System.tmp_dir!(), "wxr-takeover-#{System.unique_integer([:positive])}")
+
+        folder =
+          Path.join(System.tmp_dir!(), "wxr-takeover-#{System.unique_integer([:positive])}")
+
         on_exit(fn -> File.rm_rf(folder) end)
 
         {us, outcomes} =
@@ -484,9 +501,10 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
 
       request_url = url |> URI.encode() |> String.replace("%25", "%")
 
-      case :httpc.request(:get, {String.to_charlist(request_url), []}, [ssl: ssl, timeout: 300_000],
-             stream: String.to_charlist(destination)
-           ) do
+      case :httpc.request(
+             :get,
+             {String.to_charlist(request_url), []},
+             [ssl: ssl, timeout: 300_000], stream: String.to_charlist(destination)) do
         {:ok, :saved_to_file} ->
           if File.stat!(destination).size > @max_download do
             File.rm(destination)

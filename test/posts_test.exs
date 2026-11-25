@@ -120,7 +120,8 @@ defmodule Bonfire.WordPress.PostsTest do
     post =
       post(%{
         link: "#{site}/avif/",
-        html: ~s(<p>Photos</p><p><img src="#{avif}" alt="One"></p><p><img src="#{jpg}" alt="Two"></p>),
+        html:
+          ~s(<p>Photos</p><p><img src="#{avif}" alt="One"></p><p><img src="#{jpg}" alt="Two"></p>),
         images: images
       })
 

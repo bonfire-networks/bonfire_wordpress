@@ -28,7 +28,8 @@ defmodule Bonfire.WordPress.Takeover.Media do
       Agent.stop(report)
 
       # every one stored (not only those this run tried: a batch that failed as a whole isn't in the report)
-      if not Bonfire.WordPress.repo().exists?(base_query(storage: storage)), do: alias_storage(storage)
+      if not Bonfire.WordPress.repo().exists?(base_query(storage: storage)),
+        do: alias_storage(storage)
 
       {:ok, %{stored: stored, not_stored: Enum.reverse(not_stored)}}
     end

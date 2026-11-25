@@ -131,7 +131,8 @@ defmodule Bonfire.WordPress.Takeover.MediaTest do
           do: {key, Bonfire.Common.Config.get([:bonfire_wordpress, key])}
 
     on_exit(fn ->
-      for {key, value} <- previous, do: Bonfire.Common.Config.put([:bonfire_wordpress, key], value)
+      for {key, value} <- previous,
+          do: Bonfire.Common.Config.put([:bonfire_wordpress, key], value)
     end)
 
     # the import: bodies from the site's API, no media file ever fetched
@@ -176,7 +177,11 @@ defmodule Bonfire.WordPress.Takeover.MediaTest do
 
     Tesla.Mock.mock_global(fn
       %{method: :get, url: "#{@sample_site}/wp-json/wp/v2/posts" <> _} ->
-        %Tesla.Env{status: 200, headers: [{"x-wp-totalpages", "1"}], body: Jason.encode!([synced])}
+        %Tesla.Env{
+          status: 200,
+          headers: [{"x-wp-totalpages", "1"}],
+          body: Jason.encode!([synced])
+        }
 
       _ ->
         %Tesla.Env{status: 404, body: ""}
@@ -241,7 +246,9 @@ defmodule Bonfire.WordPress.Takeover.MediaTest do
       conn = get(build_conn(), marker)
       assert conn.status == 302, "#{marker} gave #{conn.status}"
       refute location(conn) =~ "totnespulse", "#{marker} still leads to the site"
-      assert Enum.any?(stored_ids, &String.contains?(location(conn), &1)), "#{marker} leads to #{location(conn)}"
+
+      assert Enum.any?(stored_ids, &String.contains?(location(conn), &1)),
+             "#{marker} leads to #{location(conn)}"
     end
   end
 

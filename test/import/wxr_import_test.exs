@@ -284,7 +284,10 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
 
       Tesla.Mock.mock_global(fn %{method: method, url: url} ->
         case method == :get &&
-               Regex.run(~r{^https://www\.totnespulse\.local/wp-json/wp/v2/(posts|podcast)\b}, url) do
+               Regex.run(
+                 ~r{^https://www\.totnespulse\.local/wp-json/wp/v2/(posts|podcast)\b},
+                 url
+               ) do
           [_, type] ->
             rest[type]
             |> with_script()
