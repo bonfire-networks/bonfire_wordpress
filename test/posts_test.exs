@@ -59,6 +59,42 @@ defmodule Bonfire.WordPress.PostsTest do
     assert creator_id == user_id
   end
 
+  # a block editor body keeps its structure (an image block and its caption, its alignment), still without anything that could run; how it's sanitised is the admin's choice (`Bonfire.WordPress.Sync.sanitise/0`), `:imported` unless set
+  @block_html ~s|<p>Intro</p><figure class="wp-block-image size-large alignleft"><img src="https://blog.example.local/wp-content/uploads/a.jpg" alt="Market"><figcaption class="wp-element-caption">The market</figcaption></figure><script>alert(1)</script><p>Outro</p>|
+
+  test "a block editor body keeps its figure and caption, and nothing that could run", %{me: me} do
+    post = post(%{link: "https://blog.example.local/blocks/", html: @block_html})
+    assert {:ok, _} = Posts.import_post(post, current_user: me)
+    body = imported(post.link).content.html_body
+
+    assert body =~ ~s|<figure class="wp-block-image alignleft">|
+    assert body =~ ~s|<figcaption class="wp-element-caption">The market</figcaption>|
+    assert body =~ "Outro"
+    refute body =~ "<script"
+    refute body =~ "alert(1)"
+  end
+
+  test "with the strict choice, a body keeps only basic formatting", %{me: me} do
+    Process.put([:bonfire_wordpress, :sanitise], :strict)
+    post = post(%{link: "https://blog.example.local/strict/", html: @block_html})
+    assert {:ok, _} = Posts.import_post(post, current_user: me)
+    body = imported(post.link).content.html_body
+
+    assert body =~ "Outro"
+    refute body =~ "<figure"
+    refute body =~ "<script"
+  end
+
+  test "with the unsafe choice (no sanitising), a body is stored as it came", %{me: me} do
+    Process.put([:bonfire_wordpress, :sanitise], :unsafe)
+    post = post(%{link: "https://blog.example.local/raw/", html: @block_html})
+    assert {:ok, _} = Posts.import_post(post, current_user: me)
+    body = imported(post.link).content.html_body
+
+    assert body =~ ~s|<figure class="wp-block-image size-large alignleft">|
+    assert body =~ "<script>alert(1)</script>"
+  end
+
   test "a post imported again isn't published a second time", %{me: me} do
     post = post(%{link: "https://blog.example.local/imported-twice/"})
 

@@ -187,8 +187,8 @@ defmodule Bonfire.WordPress.Posts do
                %{
                  # an HTML-encoded title (as the site's REST API sends it, eg. `It&#8217;s`) needs no decoding here: publishing reads a title as HTML, as it does a typed one
                  name: post[:title],
-                 html_body:
-                   html |> place_uploads(uploads) |> Bonfire.Common.Text.maybe_sane_html(),
+                 # sanitised on publishing, as the admin chose (`Bonfire.WordPress.Sync.sanitise/0`)
+                 html_body: place_uploads(html, uploads),
                  published_at: post[:published_at],
                  canonical_url: link,
                  uploaded_media:
@@ -197,6 +197,7 @@ defmodule Bonfire.WordPress.Posts do
                },
                opts
                |> Keyword.drop([:current_user, :post_into_group, :update, :site])
+               |> Keyword.put(:sanitise, Bonfire.WordPress.Sync.sanitise())
                # in a group, as the group shares its posts by default (as Ghost's imports do), else public
                |> Keyword.put_new(:boundary, Routing.default_boundary(context))
                |> Kernel.++(Routing.publish_opts(context))
@@ -228,12 +229,11 @@ defmodule Bonfire.WordPress.Posts do
       {html, embeds} = body_players(post)
       {uploads, other_media} = placed_uploads(creator, post, opts[:site])
 
+      sanitise = Bonfire.WordPress.Sync.sanitise()
+
       new =
-        %{
-          name: post[:title],
-          html_body: html |> place_uploads(uploads) |> Bonfire.Common.Text.maybe_sane_html()
-        }
-        |> Bonfire.Social.PostContents.maybe_prepare_contents(creator, nil, [])
+        %{name: post[:title], html_body: place_uploads(html, uploads)}
+        |> Bonfire.Social.PostContents.maybe_prepare_contents(creator, nil, sanitise: sanitise)
         |> Map.take([:name, :html_body])
 
       media_updated? = update_media(id, creator, other_media, embeds, upload_medias(uploads))
@@ -243,7 +243,8 @@ defmodule Bonfire.WordPress.Posts do
           do: Bonfire.Common.Needles.get(id, skip_boundary_check: true),
           else: {:ok, :unchanged}
       else
-        with {:ok, updated} <- Bonfire.Social.PostContents.edit(creator, current, new) do
+        with {:ok, updated} <-
+               Bonfire.Social.PostContents.edit(creator, current, new, sanitise: sanitise) do
           route_updated(creator, id, post, opts)
           {:ok, updated}
         end
@@ -540,7 +541,7 @@ defmodule Bonfire.WordPress.Posts do
   """
   def register_redir_storage(site) do
     with name when is_binary(name) <- redir_storage(site),
-         storages = Bonfire.Common.Config.get([:bonfire_files, :redir_storages], %{}) || %{},
+         storages = Bonfire.Files.redir_storages(),
          false <- Map.has_key?(storages, name) do
       Bonfire.Common.Settings.put(
         [:bonfire_files, :redir_storages],

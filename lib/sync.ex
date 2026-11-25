@@ -34,6 +34,15 @@ defmodule Bonfire.WordPress.Sync do
     end
   end
 
+  @doc "How the body of a post imported from the site is sanitised (see `Bonfire.Common.Text.maybe_sane_html/2`): `:imported` (the default) keeps its figures, captions and block classes, `:strict` keeps only basic formatting, `:unsafe` keeps the HTML as it came."
+  def sanitise do
+    case Config.get([:bonfire_wordpress, :sanitise]) do
+      value when value in [:strict, "strict"] -> :strict
+      value when value in [:unsafe, "unsafe"] -> :unsafe
+      _ -> :imported
+    end
+  end
+
   @doc "When the last sync started, as a `DateTime`, or nil."
   def last_sync, do: datetime(Config.get([:bonfire_wordpress, :last_sync]))
 

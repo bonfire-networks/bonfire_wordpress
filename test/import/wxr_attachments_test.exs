@@ -127,6 +127,17 @@ defmodule Bonfire.WordPress.Import.WXRAttachmentsTest do
 
   defp count(html, text), do: length(String.split(html, text)) - 1
 
+  # after a restart the instance settings come back into Config as a keyword list with atom keys, not the map they were put as
+  test "a site's storage key is added after a restart too, keeping the others" do
+    Bonfire.Common.Config.put([:bonfire_files, :redir_storages], old: {:alias, "local"})
+
+    assert :ok = Bonfire.WordPress.Posts.register_redir_storage("https://another.example.local")
+
+    storages = Bonfire.Files.redir_storages()
+    assert storages["old"] == {:alias, "local"}
+    assert Enum.any?(storages, fn {key, kind} -> key =~ "another" and kind == :lookup end)
+  end
+
   test "an upload shown in two sizes by two posts is one Media, attached to both, at the larger size" do
     small = imported("small")
     large = imported("large")

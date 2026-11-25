@@ -13,7 +13,7 @@ defmodule Bonfire.WordPress.SettingsTest do
 
   setup do
     # instance settings also go into the app's config, which outlives each test's database rollback
-    for key <- [:site_url, :auto_import_as, :last_sync, :post_into_group],
+    for key <- [:site_url, :auto_import_as, :last_sync, :post_into_group, :sanitise],
         do: put_setting(key, nil)
 
     admin_account = fake_account!()
@@ -169,6 +169,54 @@ defmodule Bonfire.WordPress.SettingsTest do
       end)
 
       assert Bonfire.WordPress.Sync.post_into_group() == nil
+    end
+  end
+
+  describe "how the site's posts are sanitised" do
+    test "keeping their structure is picked unless another choice was made", %{
+      admin_conn: admin_conn
+    } do
+      admin_conn
+      |> visit(@page)
+      |> wait_async()
+      |> assert_has("[data-role=sanitise_form] option[selected]", text: "Keep their structure")
+    end
+
+    test "an admin picks another choice, and it's stored", %{admin_conn: admin_conn} do
+      admin_conn
+      |> visit(@page)
+      |> wait_async()
+      |> within("[data-role=sanitise_form]", fn session ->
+        select(session, "Strict: basic formatting only", from: "Sanitising")
+      end)
+
+      assert Bonfire.WordPress.Sync.sanitise() == :strict
+    end
+
+    # unsafe is only settable in config, so the form doesn't offer it
+    test "unsafe isn't offered", %{admin_conn: admin_conn} do
+      admin_conn
+      |> visit(@page)
+      |> wait_async()
+      |> assert_has("[data-role=sanitise_form] option", text: "Strict: basic formatting only")
+      |> refute_has("[data-role=sanitise_form] option", text: "Unsafe (no sanitising)")
+      |> refute_has("[data-role=sanitise_form]", text: "could run script")
+    end
+
+    # the control is the test above it: the same event from an admin stores the choice
+    test "someone who isn't an instance admin can't change it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/feed/my")
+
+      try do
+        render_hook(view, "Bonfire.Common.Settings:set", %{
+          "bonfire_wordpress" => %{"sanitise" => "unsafe"},
+          "scope" => "instance"
+        })
+      catch
+        :exit, _ -> :ok
+      end
+
+      assert Bonfire.WordPress.Sync.sanitise() == :imported
     end
   end
 
