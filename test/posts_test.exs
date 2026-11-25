@@ -96,6 +96,42 @@ defmodule Bonfire.WordPress.PostsTest do
     assert body =~ "<script>alert(1)</script>"
   end
 
+  # an upload of a type this instance can't store (eg. AVIF, unless allowed) has no place in its storage, so the post shows it from the site, and the post's other uploads are placed as usual
+  test "an upload of a type this instance doesn't store stays on the site, and the post still comes in",
+       %{me: me} do
+    site = "https://blog.example.local"
+    avif = "#{site}/wp-content/uploads/2024/01/photo.avif"
+    jpg = "#{site}/wp-content/uploads/2024/01/market.jpg"
+
+    images =
+      Bonfire.WordPress.Uploads.group(
+        [{1, avif, avif, 800, "image/avif"}, {2, jpg, jpg, 800, "image/jpeg"}],
+        fn media_type, id, url, width ->
+          Bonfire.WordPress.Uploads.entry(%{
+            id: id,
+            url: url,
+            width: width,
+            media_type: media_type,
+            sizes: [{url, width}]
+          })
+        end
+      )
+
+    post =
+      post(%{
+        link: "#{site}/avif/",
+        html: ~s(<p>Photos</p><p><img src="#{avif}" alt="One"></p><p><img src="#{jpg}" alt="Two"></p>),
+        images: images
+      })
+
+    assert {:ok, _} = Posts.import_post(post, current_user: me, site: site)
+    body = imported(post.link).content.html_body
+
+    assert body =~ ~s(src="#{avif}")
+    refute body =~ ~s(src="#{jpg}")
+    assert body =~ "/files/redir/"
+  end
+
   test "a post imported again isn't published a second time", %{me: me} do
     post = post(%{link: "https://blog.example.local/imported-twice/"})
 
@@ -176,6 +212,51 @@ defmodule Bonfire.WordPress.PostsTest do
 
     assert %{media_type: media_type} = media[audio]
     assert media_type =~ "audio"
+  end
+
+  # WordPress's audio shortcode adds `?_=1` to its player's file, which is still the episode's own file: not attached again, nor fetched
+  test "an episode's own file in a shortcode player, with WordPress's `?_=1` on it, isn't attached a second time",
+       %{me: me} do
+    audio = "https://blog.example.local/wp-content/uploads/a-shortcode-episode.mp3"
+    test_pid = self()
+
+    Tesla.Mock.mock_global(fn %{url: url} ->
+      send(test_pid, {:requested, url})
+      %Tesla.Env{status: 404, body: ""}
+    end)
+
+    post =
+      post(%{
+        link: "https://blog.example.local/a-shortcode-episode/",
+        html:
+          ~s(<p>This week's episode</p><audio class="wp-audio-shortcode" controls="controls"><source type="audio/mpeg" src="#{audio}?_=1" /></audio>),
+        media: [%{url: audio, media_type: "audio/mpeg", alt: nil, primary?: false}]
+      })
+
+    assert {:ok, _} = Posts.import_post(post, current_user: me)
+    %{id: id} = imported(post.link)
+
+    requested =
+      Stream.repeatedly(fn ->
+        receive do
+          {:requested, url} -> url
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+
+    refute Enum.any?(requested, &String.starts_with?(&1, audio))
+
+    assert {:ok, imported} = Bonfire.Common.Needles.get(id, skip_boundary_check: true)
+
+    paths =
+      imported
+      |> Repo.preload([files: :media], force: true)
+      |> Map.get(:files)
+      |> Enum.map(& &1.media.path)
+
+    assert [_] = Enum.filter(paths, &String.starts_with?(&1, audio))
   end
 
   # a podcast's body often has a player for the same file the episode attaches: the player keeps its place as a link, and the file is attached once

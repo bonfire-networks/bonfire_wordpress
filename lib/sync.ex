@@ -16,6 +16,7 @@ defmodule Bonfire.WordPress.Sync do
 
   @op "wordpress_sync"
   @check_op "wordpress_removal_check"
+  @takeover_media_op "wordpress_takeover_media"
 
   # a sync already waiting isn't queued again, however many pings come in before it runs (one running doesn't count, since posts may change after it started)
   @unique [keys: [:op, :identifier], states: [:available, :scheduled], period: :infinity]
@@ -150,17 +151,33 @@ defmodule Bonfire.WordPress.Sync do
   def site_key(_), do: nil
 
   @impl true
-  def import_ops, do: [@op, @check_op]
+  def import_ops, do: [@op, @check_op, @takeover_media_op]
 
   @impl true
   def import_op_label(@op), do: l("WordPress sync")
   def import_op_label(@check_op), do: l("WordPress removals check")
+  def import_op_label(@takeover_media_op), do: l("WordPress media takeover")
   def import_op_label(_), do: nil
 
   @impl true
   def import_op_phrase(@op), do: l("Fetching changes from WordPress")
   def import_op_phrase(@check_op), do: l("Checking for posts removed from WordPress")
+  def import_op_phrase(@takeover_media_op), do: l("Storing the WordPress site's media here")
   def import_op_phrase(_), do: nil
+
+  @doc """
+  Queues storing the configured site's imported media here, from `folder` (its uploads folder copied to this server, see `Bonfire.WordPress.Takeover.Media.run/2`), as `user`, who must be an instance admin. It shows in their background jobs, with what it couldn't store.
+  """
+  def takeover_media(user, folder) when is_binary(folder) do
+    folder = String.trim(folder)
+
+    cond do
+      not Import.instance_admin?(user) -> {:error, :unauthorized}
+      is_nil(site_url()) -> {:error, :no_site}
+      folder == "" -> {:error, :no_folder}
+      true -> Import.enqueue_many(@takeover_media_op, Bonfire.Common.Enums.id(user), folder)
+    end
+  end
 
   @doc """
   Syncs the configured site (the job's identifier): every post and podcast episode changed there since the last sync, imported as the user whose import the site is. A post already imported gets the site's edit: the site wins, so an edit made here is overwritten (see `Bonfire.WordPress.Posts.import_post/2` with `update: true`). Remembers when it started, so the next sync starts there.
@@ -192,6 +209,24 @@ defmodule Bonfire.WordPress.Sync do
     else
       {:error, _} = e -> e
       other -> error(other, "Could not sync the WordPress site")
+    end
+  end
+
+  # The configured site's imported media stored here from the folder (the job's identifier), checked again to be run by an instance admin, since a job can be queued by other means. What couldn't be stored is the job's error, so it shows in the admin's background jobs, and a later run stores the rest
+  def perform_import(@takeover_media_op, folder, opts) do
+    with true <- Import.instance_admin?(opts[:current_user]) || {:error, :unauthorized},
+         site when is_binary(site) <- site_url() || {:error, :no_site},
+         {:ok, %{not_stored: []}} <- Bonfire.WordPress.Takeover.Media.run(site, folder) do
+      :ok
+    else
+      {:ok, %{stored: stored, not_stored: not_stored}} ->
+        {:error,
+         l("%{stored} stored, %{count} not stored:", stored: stored, count: length(not_stored)) <>
+           "\n" <>
+           Enum.map_join(not_stored, "\n", &"#{&1.url} (#{inspect(&1.reason)})")}
+
+      {:error, _} = e ->
+        e
     end
   end
 

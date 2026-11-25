@@ -206,7 +206,7 @@ defmodule Bonfire.WordPress.Import.WXR do
           count: counts.posts,
           importable?: true,
           reason: nil,
-          options: author_options(preview.author_counts)
+          options: author_options(preview.author_counts) ++ update_options(preview.already)
         }
       else
         %{
@@ -246,6 +246,35 @@ defmodule Bonfire.WordPress.Import.WXR do
     ]
 
   defp author_options(_), do: []
+
+  # the posts a previous import brought in, given the site's version again: a post is found by the link it came from, not by who imported it, so this could overwrite someone else's post, and only an instance admin is offered it (as the site's sync is instance config). There's no record of when a post was last stored, so every one goes through the update, which leaves a post whose title and body are the same unedited
+  defp update_options(0), do: []
+
+  defp update_options(already),
+    do: [
+      %{
+        key: :update_imported,
+        label:
+          lp(
+            "Update the %{count} post already imported with the site's version (edits made here are lost)",
+            "Update the %{count} posts already imported with the site's version (edits made here are lost)",
+            already,
+            count: already
+          ),
+        default: false,
+        admin_only?: true
+      }
+    ]
+
+  defp update_lines(0), do: []
+
+  defp update_lines(count),
+    do: [
+      %{
+        key: l("Posts"),
+        reason: lp("%{count} to update", "%{count} to update", count, count: count)
+      }
+    ]
 
   defp already_lines(0), do: []
 
@@ -343,6 +372,9 @@ defmodule Bonfire.WordPress.Import.WXR do
     author_users? =
       opts[:create_author_users] == true and Import.instance_admin?(opts[:current_user])
 
+    # the posts already imported given the site's version again only when asked for, and only by an instance admin (see `update_options/1`)
+    update? = opts[:update_imported] == true and Import.instance_admin?(opts[:current_user])
+
     # the group the posts go into: the one asked for, else the one the instance's WordPress site posts into (as its sync does), for anyone who can post there (see `Bonfire.WordPress.Posts.can_post_in?/2`)
     asked_group_id =
       blank_to_nil(opts[:post_into_group]) || Bonfire.WordPress.Sync.post_into_group()
@@ -369,21 +401,21 @@ defmodule Bonfire.WordPress.Import.WXR do
 
       staged_posts = read_posts_index(dir)
 
-      # the posts a previous import already brought in, found in one query, aren't queued again
+      # the posts a previous import already brought in, found in one query, aren't queued again, unless they're to be updated
       done = Bonfire.WordPress.Posts.imported_links(Enum.map(staged_posts, & &1["link"]))
-      posts = Enum.reject(staged_posts, &MapSet.member?(done, &1["link"]))
-      already = length(staged_posts) - length(posts)
+      {to_update, posts} = Enum.split_with(staged_posts, &MapSet.member?(done, &1["link"]))
+      {to_update, already} = if update?, do: {to_update, []}, else: {[], to_update}
 
       # the REST requests to make: each type's post ids, 100 at a time
       chunks =
-        posts
+        (posts ++ to_update)
         |> Enum.group_by(&@rest_types[&1["type"]], & &1["id"])
         |> Map.new(fn {rest_type, ids} -> {rest_type, Enum.chunk_every(ids, @chunk_size)} end)
 
       File.write!(Path.join(dir, "chunks.json"), Jason.encode!(chunks))
 
       jobs =
-        for post <- posts do
+        for post <- posts ++ to_update do
           rest_type = @rest_types[post["type"]]
 
           %{
@@ -397,7 +429,8 @@ defmodule Bonfire.WordPress.Import.WXR do
               "rest_type" => rest_type,
               "chunk" => Enum.find_index(chunks[rest_type], &(post["id"] in &1)),
               "authors" => author_users?,
-              "group_id" => group_id
+              "group_id" => group_id,
+              "update" => update? and MapSet.member?(done, post["link"])
             }
           }
         end
@@ -420,7 +453,7 @@ defmodule Bonfire.WordPress.Import.WXR do
       topics =
         Bonfire.WordPress.Posts.ensure_topics(
           group_id,
-          Enum.flat_map(posts, &List.wrap(&1["categories"])),
+          Enum.flat_map(posts ++ to_update, &List.wrap(&1["categories"])),
           opts[:current_user]
         )
 
@@ -428,9 +461,10 @@ defmodule Bonfire.WordPress.Import.WXR do
        %{
          jobs: jobs,
          notes:
-           authors_lines(authors) ++
+           update_lines(length(to_update)) ++
+             authors_lines(authors) ++
              group_lines(asked_group_id, group_id) ++ topics_lines(topics),
-         skipped: already_lines(already) ++ not_imported
+         skipped: already_lines(length(already)) ++ not_imported
        }}
     else
       {:ok, %{jobs: [], skipped: not_imported}}
@@ -463,7 +497,8 @@ defmodule Bonfire.WordPress.Import.WXR do
         },
         current_user: opts[:current_user],
         post_into_group: args["group_id"],
-        site: args["site"]
+        site: args["site"],
+        update: args["update"] == true
       )
     else
       {:error, _} = e -> e

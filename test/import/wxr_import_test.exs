@@ -274,6 +274,92 @@ defmodule Bonfire.WordPress.Import.WXRImportTest do
     assert Enum.any?(second.skipped, &(&1.reason =~ "4 already imported"))
   end
 
+  describe "re-importing with updates" do
+    # the post edited on the site between the two imports
+    @edited 3060
+
+    # the site's answers again, with one post's body edited there since the first import
+    defp mock_edited_site do
+      rest = @rest |> File.read!() |> Jason.decode!()
+
+      Tesla.Mock.mock_global(fn %{method: method, url: url} ->
+        case method == :get &&
+               Regex.run(~r{^https://www\.totnespulse\.local/wp-json/wp/v2/(posts|podcast)\b}, url) do
+          [_, type] ->
+            rest[type]
+            |> with_script()
+            |> with_embed()
+            |> Enum.map(fn
+              %{"id" => @edited} = item ->
+                update_in(item, ["content", "rendered"], &(&1 <> "<p>Corrected on the site</p>"))
+
+              item ->
+                item
+            end)
+            |> Tesla.Mock.json()
+
+          _ ->
+            %Tesla.Env{status: 404, body: ""}
+        end
+      end)
+    end
+
+    defp link_of(id), do: Enum.find(@posts, &(&1.id == id)).link
+
+    test "an admin re-importing with updates gets a post edited on the site with its new body, and leaves the others unedited" do
+      me = Bonfire.UI.Common.Testing.Helpers.fake_admin!()
+      import_posts(me)
+
+      before = for %{link: link} <- @posts, into: %{}, do: {link, imported(link).content}
+      refute before[link_of(@edited)].html_body =~ "Corrected on the site"
+
+      mock_edited_site()
+      second = import_posts(me, update_imported: true)
+
+      assert Enum.any?(second.notes, &(&1.reason =~ "4 to update"))
+      refute Enum.any?(second.skipped, &(&1.reason =~ "already imported"))
+
+      assert imported(link_of(@edited)).content.html_body =~ "Corrected on the site"
+
+      # the others are as they were: no edit, so no Update sent out for them
+      for %{link: link, id: id} <- @posts, id != @edited do
+        assert imported(link).content == before[link]
+      end
+
+      assert count_posts_titled(Enum.map(@posts, & &1.title)) == 4
+    end
+
+    test "updating posts already imported is offered only to an admin, and only when some are" do
+      admin = Bonfire.UI.Common.Testing.Helpers.fake_admin!()
+      user = fake_user!()
+
+      offered_keys = fn user ->
+        assert {:ok, staged} = WXR.stage(@fixture)
+        on_exit(fn -> File.rm_rf(staged.dir) end)
+        posts = Enum.find(Import.staged_items(staged), &(&1.key == :posts))
+        Enum.map(Import.offered_options(posts, user), & &1.key)
+      end
+
+      # a first import has nothing to update
+      refute :update_imported in offered_keys.(admin)
+
+      import_posts(admin)
+
+      assert :update_imported in offered_keys.(admin)
+      refute :update_imported in offered_keys.(user)
+    end
+
+    test "someone who isn't an admin asking for updates anyway gets none", %{me: me} do
+      import_posts(me)
+      mock_edited_site()
+
+      second = import_posts(me, update_imported: true)
+
+      assert Enum.any?(second.skipped, &(&1.reason =~ "4 already imported"))
+      refute imported(link_of(@edited)).content.html_body =~ "Corrected on the site"
+    end
+  end
+
   # the hand-written items at the end of the fixture: what an export holds that must not come in
   @not_imported [
     "A draft that was never published",

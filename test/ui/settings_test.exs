@@ -3,6 +3,7 @@ defmodule Bonfire.WordPress.SettingsTest do
   An instance admin sees the WordPress site this instance keeps in sync in the instance settings: the site's address, who its posts come in as, when it last synced, and the address to paste into the site's Settings > Writing so it pings Bonfire. The admin can change the site and the user. Nobody else can see or change them.
   """
   use Bonfire.WordPress.ConnCase, async: false
+  use Oban.Testing, repo: Bonfire.Common.Repo
   import PhoenixTest
   import Phoenix.LiveViewTest, only: [live: 2, render_hook: 3]
 
@@ -217,6 +218,88 @@ defmodule Bonfire.WordPress.SettingsTest do
       end
 
       assert Bonfire.WordPress.Sync.sanitise() == :imported
+    end
+  end
+
+  describe "storing the site's media here, at takeover" do
+    setup %{admin: admin} do
+      put_setting(:site_url, @site)
+      Process.put([:bonfire_files, :storage], :local)
+
+      previous = Application.get_env(:bonfire_files, :redir_storages)
+      on_exit(fn -> Application.put_env(:bonfire_files, :redir_storages, previous) end)
+
+      # an upload as the import makes it: pointing at the site, with a locator in the site's storage
+      key = Bonfire.WordPress.Posts.redir_storage(@site)
+      Bonfire.WordPress.Posts.register_redir_storage(@site)
+
+      {:ok, media} =
+        Bonfire.Files.save_url_as_media(admin, "#{@site}/wp-content/uploads/2019/01/b.png", %{
+          media_type: "image/png"
+        })
+
+      {:ok, media} = Bonfire.Files.put_storage_locator(media, key)
+      on_exit(fn -> File.rm(Entrepot.Storages.Disk.path(media.file.id)) end)
+
+      folder = Path.join(System.tmp_dir!(), "takeover-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(folder)
+      on_exit(fn -> File.rm_rf(folder) end)
+
+      {:ok, key: key, media: media, folder: folder}
+    end
+
+    defp takeover_jobs,
+      do:
+        for(
+          job <- all_enqueued(worker: Bonfire.Common.Import),
+          job.args["op"] == "wordpress_takeover_media",
+          do: job
+        )
+
+    test "an admin starts it with the copied uploads folder; a run missing a file reports it, and once the file is added a run stores it",
+         %{admin_conn: admin_conn, key: key, media: media, folder: folder} do
+      admin_conn
+      |> visit(@page)
+      |> wait_async()
+      |> within("[data-role=takeover_media_form]", fn session ->
+        session
+        |> fill_in("Uploads folder", with: folder)
+        |> submit()
+      end)
+
+      assert [job] = takeover_jobs()
+      assert {:error, report} = Bonfire.Common.Import.perform(job)
+      assert report =~ media.path
+      assert Bonfire.Files.redir_storages()[key] == :lookup
+
+      destination = Path.join(folder, "2019/01/b.png")
+      File.mkdir_p!(Path.dirname(destination))
+      File.cp!(Bonfire.Files.Simulation.image_file().path, destination)
+
+      assert :ok = Bonfire.Common.Import.perform(job)
+      assert Bonfire.Files.redir_storages()[key] == {:alias, Bonfire.Files.default_storage_name()}
+    end
+
+    test "someone who isn't an instance admin isn't offered it, and a run queued as them stores nothing",
+         %{conn: conn, me: me, media: media, folder: folder} do
+      File.mkdir_p!(Path.join(folder, "2019/01"))
+      File.cp!(Bonfire.Files.Simulation.image_file().path, Path.join(folder, "2019/01/b.png"))
+
+      conn
+      |> visit(@page)
+      |> wait_async()
+      |> refute_has("[data-role=takeover_media_form]")
+
+      assert {:error, _} =
+               Bonfire.Common.Import.perform(%Oban.Job{
+                 args: %{
+                   "op" => "wordpress_takeover_media",
+                   "user_id" => me.id,
+                   "identifier" => folder
+                 }
+               })
+
+      assert Bonfire.Common.Repo.reload!(media).path == media.path
     end
   end
 

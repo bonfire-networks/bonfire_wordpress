@@ -86,5 +86,37 @@
         </div>
       </div>
     </section>
+
+    <section :if={@site_url} class="rounded-box border border-divider bg-base-100">
+      <div class="flex items-center gap-2 p-4 border-b border-divider">
+        <#Icon iconify="ph:image-fill" class="size-5 text-muted" />
+        <h3 class="font-bold text-base">{l("Takeover: store the site's media here")}</h3>
+      </div>
+
+      <form
+        data-role="takeover_media_form"
+        phx-submit="takeover_media"
+        phx-target={@myself}
+        class="p-4 flex flex-col gap-2"
+      >
+        <label for="wordpress_takeover_folder" class="text-sm font-medium">{l("Uploads folder")}</label>
+        <p class="text-sm text-muted">{l(
+            "The site's wp-content/uploads folder, copied to this server. Each image, audio or other file the imported posts show is stored here, images resized as uploads are. Once all of them are, the posts show them from here rather than from the site, and the copied folder can be removed."
+          )}</p>
+        <div class="flex gap-2">
+          <input
+            id="wordpress_takeover_folder"
+            name="folder"
+            type="text"
+            placeholder="/path/to/wp-content/uploads"
+            class="input input-bordered input-sm flex-1"
+          />
+          <button type="submit" class="btn btn-sm btn-primary">{l("Store")}</button>
+        </div>
+        <p class="text-sm text-muted">{l(
+            "It runs in the background: its progress, and any file it couldn't find, show in the background jobs. Run it again once missing files are added."
+          )}</p>
+      </form>
+    </section>
   {/if}
 </div>

@@ -257,8 +257,13 @@ defmodule Bonfire.WordPress.Posts do
   # The body with each player (an `<iframe>`, `<video>` or `<audio>`, which the sanitiser drops) turned into a link where it was, and the players' URLs to attach. A player of a file the post already attaches (eg. a podcast's own episode) stays a link in the body without being attached twice.
   defp body_players(post) do
     {html, players} = Bonfire.Files.InlineMedia.embeds_as_links(post[:html])
-    {html, players -- Enum.map(List.wrap(post[:media]), & &1[:url])}
+    own_files = post[:media] |> List.wrap() |> Enum.map(& &1[:url]) |> MapSet.new()
+    {html, Enum.reject(players, &MapSet.member?(own_files, without_shortcode_query(&1)))}
   end
+
+  # WordPress's audio and video shortcodes add `?_=<n>` to the file their player plays (to tell players of the same file apart on a page): still the same file
+  defp without_shortcode_query(url) when is_binary(url), do: String.replace(url, ~r/\?_=\d+$/, "")
+  defp without_shortcode_query(url), do: url
 
   # the post's media become the site's, as an import attaches them (see `Bonfire.Files.update_object_media/3`), with the uploads its body shows: whether they changed
   defp update_media(id, creator, media, embeds, uploads) do

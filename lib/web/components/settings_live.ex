@@ -53,6 +53,25 @@ defmodule Bonfire.WordPress.Web.SettingsLive do
     end
   end
 
+  # `Bonfire.WordPress.Sync.takeover_media/2` checks again that it's an instance admin
+  def handle_event("takeover_media", %{"folder" => folder}, socket) do
+    case Bonfire.WordPress.Sync.takeover_media(current_user(socket), folder) do
+      {:error, :no_folder} ->
+        {:noreply, assign_error(socket, l("Please give the path of the copied uploads folder"))}
+
+      {:error, _} = e ->
+        {:noreply, assign_error(socket, Bonfire.Common.Errors.error_msg(e))}
+
+      _ ->
+        {:noreply,
+         assign_flash(
+           socket,
+           :info,
+           l("Started storing the site's media: see the background jobs for its progress")
+         )}
+    end
+  end
+
   @doc "The address the site pings when a post is published or edited, to paste into its Settings > Writing."
   def ping_url, do: Bonfire.Common.URIs.base_url() <> "/wordpress/ping"
 
