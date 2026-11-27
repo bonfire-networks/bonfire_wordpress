@@ -504,7 +504,9 @@ defmodule Bonfire.WordPress.Import.WXRImportIntegrationTest do
       case :httpc.request(
              :get,
              {String.to_charlist(request_url), []},
-             [ssl: ssl, timeout: 300_000], stream: String.to_charlist(destination)) do
+             [ssl: ssl, timeout: 300_000],
+             stream: String.to_charlist(destination)
+           ) do
         {:ok, :saved_to_file} ->
           if File.stat!(destination).size > @max_download do
             File.rm(destination)
