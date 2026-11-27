@@ -96,16 +96,16 @@ defmodule Bonfire.WordPress.PostsTest do
     assert body =~ "<script>alert(1)</script>"
   end
 
-  # an upload of a type this instance can't store (eg. AVIF, unless allowed) has no place in its storage, so the post shows it from the site, and the post's other uploads are placed as usual
+  # an upload of a type this instance can't store (eg. JPEG XL, which no tool here converts) has no place in its storage, so the post shows it from the site, and the post's other uploads are placed as usual. A type whose acceptance follows the tools (eg. AVIF) would make this test depend on the machine
   test "an upload of a type this instance doesn't store stays on the site, and the post still comes in",
        %{me: me} do
     site = "https://blog.example.local"
-    avif = "#{site}/wp-content/uploads/2024/01/photo.avif"
+    jxl = "#{site}/wp-content/uploads/2024/01/photo.jxl"
     jpg = "#{site}/wp-content/uploads/2024/01/market.jpg"
 
     images =
       Bonfire.WordPress.Uploads.group(
-        [{1, avif, avif, 800, "image/avif"}, {2, jpg, jpg, 800, "image/jpeg"}],
+        [{1, jxl, jxl, 800, "image/jxl"}, {2, jpg, jpg, 800, "image/jpeg"}],
         fn media_type, id, url, width ->
           Bonfire.WordPress.Uploads.entry(%{
             id: id,
@@ -119,16 +119,16 @@ defmodule Bonfire.WordPress.PostsTest do
 
     post =
       post(%{
-        link: "#{site}/avif/",
+        link: "#{site}/jxl/",
         html:
-          ~s(<p>Photos</p><p><img src="#{avif}" alt="One"></p><p><img src="#{jpg}" alt="Two"></p>),
+          ~s(<p>Photos</p><p><img src="#{jxl}" alt="One"></p><p><img src="#{jpg}" alt="Two"></p>),
         images: images
       })
 
     assert {:ok, _} = Posts.import_post(post, current_user: me, site: site)
     body = imported(post.link).content.html_body
 
-    assert body =~ ~s(src="#{avif}")
+    assert body =~ ~s(src="#{jxl}")
     refute body =~ ~s(src="#{jpg}")
     assert body =~ "/files/redir/"
   end
